@@ -156,8 +156,40 @@ class GPUGenerationModelRunner(OmniGPUModelRunner):
                     {"model_outputs": out.detach().to("cpu").contiguous() if out is not None else None}
                 )
         elif isinstance(multimodal_outputs, dict):
-            for key, out in multimodal_outputs.items():
-                pooler_output.append({key: out.detach().to("cpu").contiguous() if out is not None else None})
+            if len(multimodal_outputs) == 1:
+                # Single dict item with batched outputs - split by request
+                key, out = next(iter(multimodal_outputs.items()))
+                if out is not None:
+                    # Get num_scheduled_tokens for each request in batch
+                    req_ids = self.input_batch.req_ids
+                    num_tokens_per_req = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+                    total_tokens = sum(num_tokens_per_req)
+                    output_length = out.shape[0]
+
+                    # Split the output proportionally based on num_tokens_per_req
+                    start_idx = 0
+                    for num_tokens in num_tokens_per_req:
+                        # Calculate proportional length for this request
+                        proportion = num_tokens / total_tokens
+                        req_length = int(proportion * output_length)
+                        end_idx = start_idx + req_length
+
+                        req_output = out[start_idx:end_idx]
+                        pooler_output.append({key: req_output.detach().to("cpu").contiguous()})
+                        start_idx = end_idx
+
+                    # Handle any remaining items due to rounding
+                    if start_idx < output_length:
+                        last_output = pooler_output[-1][key]
+                        remaining = out[start_idx:]
+                        pooler_output[-1] = {key: torch.cat([last_output, remaining], dim=0)}
+                else:
+                    for _ in range(self.input_batch.num_reqs):
+                        pooler_output.append({key: None})
+            else:
+                # Multiple dict items - assume one per request
+                for key, out in multimodal_outputs.items():
+                    pooler_output.append({key: out.detach().to("cpu").contiguous() if out is not None else None})
         else:
             raise RuntimeError("Unsupported diffusion output type")
         output = OmniModelRunnerOutput(
