@@ -168,20 +168,25 @@ class GPUGenerationModelRunner(OmniGPUModelRunner):
                         req_ids = self.input_batch.req_ids
                         num_tokens_per_req = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
                         total_tokens = sum(num_tokens_per_req)
-                        output_length = out.shape[0]
+                        output_length = out.shape[1]
 
                         # Calculate split sizes based on proportion of tokens
                         split_sizes = []
                         for num_tokens in num_tokens_per_req:
-                            proportion = num_tokens * 1.0 / total_tokens
-                            req_length = int(proportion * output_length)
-                            split_sizes.append(req_length)
+                            proportion = num_tokens / total_tokens
+                            req_length = round(proportion * output_length)
+                            # Ensure at least 1 element per request
+                            split_sizes.append(max(1, req_length))
 
-                        # Adjust last split size to account for rounding
-                        split_sizes[-1] = output_length - sum(split_sizes[:-1])
+                        # Adjust to match exact output_length
+                        current_total = sum(split_sizes)
+                        if current_total != output_length:
+                            # Adjust the last split size
+                            split_sizes[-1] = max(1, split_sizes[-1] + (output_length - current_total))
 
                         # Split the tensor and copy to CPU
                         logger.info(f"Split sizes for output tensor: {split_sizes}")
+                        logger.info(f"Output tensor shape: {out.shape}")
                         split_outputs = torch.split(out, split_sizes, dim=1)
                         for req_output in split_outputs:
                             pooler_output.append({key: req_output.detach().to("cpu").contiguous()})
