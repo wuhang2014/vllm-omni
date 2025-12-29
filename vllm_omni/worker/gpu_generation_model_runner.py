@@ -178,11 +178,6 @@ class GPUGenerationModelRunner(OmniGPUModelRunner):
                         pooler_output.append({key: req_output.detach().to("cpu").contiguous()})
                         start_idx = end_idx
 
-                    # Handle any remaining items due to rounding
-                    if start_idx < output_length:
-                        last_output = pooler_output[-1][key]
-                        remaining = out[start_idx:]
-                        pooler_output[-1] = {key: torch.cat([last_output, remaining], dim=0)}
                 else:
                     for _ in range(self.input_batch.num_reqs):
                         pooler_output.append({key: None})
