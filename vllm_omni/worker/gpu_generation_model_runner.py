@@ -160,26 +160,30 @@ class GPUGenerationModelRunner(OmniGPUModelRunner):
                 # Single dict item with batched outputs - split by request
                 key, out = next(iter(multimodal_outputs.items()))
                 if out is not None:
-                    # Get num_scheduled_tokens for each request in batch
-                    req_ids = self.input_batch.req_ids
-                    num_tokens_per_req = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
-                    total_tokens = sum(num_tokens_per_req)
-                    output_length = out.shape[0]
+                    # If batch size is 1, no need to split
+                    if self.input_batch.num_reqs == 1:
+                        pooler_output.append({key: out.detach().to("cpu").contiguous()})
+                    else:
+                        # Get num_scheduled_tokens for each request in batch
+                        req_ids = self.input_batch.req_ids
+                        num_tokens_per_req = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+                        total_tokens = sum(num_tokens_per_req)
+                        output_length = out.shape[0]
 
-                    # Calculate split sizes based on proportion of tokens
-                    split_sizes = []
-                    for num_tokens in num_tokens_per_req:
-                        proportion = num_tokens / total_tokens
-                        req_length = int(proportion * output_length)
-                        split_sizes.append(req_length)
+                        # Calculate split sizes based on proportion of tokens
+                        split_sizes = []
+                        for num_tokens in num_tokens_per_req:
+                            proportion = num_tokens / total_tokens
+                            req_length = int(proportion * output_length)
+                            split_sizes.append(req_length)
 
-                    # Adjust last split size to account for rounding
-                    split_sizes[-1] = output_length - sum(split_sizes[:-1])
+                        # Adjust last split size to account for rounding
+                        split_sizes[-1] = output_length - sum(split_sizes[:-1])
 
-                    # Split the tensor and copy to CPU
-                    split_outputs = torch.split(out, split_sizes, dim=1)
-                    for req_output in split_outputs:
-                        pooler_output.append({key: req_output.detach().to("cpu").contiguous()})
+                        # Split the tensor and copy to CPU
+                        split_outputs = torch.split(out, split_sizes, dim=1)
+                        for req_output in split_outputs:
+                            pooler_output.append({key: req_output.detach().to("cpu").contiguous()})
                 else:
                     for _ in range(self.input_batch.num_reqs):
                         pooler_output.append({key: None})
