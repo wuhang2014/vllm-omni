@@ -166,18 +166,20 @@ class GPUGenerationModelRunner(OmniGPUModelRunner):
                     total_tokens = sum(num_tokens_per_req)
                     output_length = out.shape[0]
 
-                    # Split the output proportionally based on num_tokens_per_req
-                    start_idx = 0
+                    # Calculate split sizes based on proportion of tokens
+                    split_sizes = []
                     for num_tokens in num_tokens_per_req:
-                        # Calculate proportional length for this request
                         proportion = num_tokens / total_tokens
                         req_length = int(proportion * output_length)
-                        end_idx = start_idx + req_length
+                        split_sizes.append(req_length)
 
-                        req_output = out[start_idx:end_idx]
+                    # Adjust last split size to account for rounding
+                    split_sizes[-1] = output_length - sum(split_sizes[:-1])
+
+                    # Split the tensor and copy to CPU
+                    split_outputs = torch.split(out, split_sizes, dim=1)
+                    for req_output in split_outputs:
                         pooler_output.append({key: req_output.detach().to("cpu").contiguous()})
-                        start_idx = end_idx
-
                 else:
                     for _ in range(self.input_batch.num_reqs):
                         pooler_output.append({key: None})
