@@ -431,22 +431,18 @@ class Qwen3OmniMoeForConditionalGeneration(
 
             codes = []
             if input_ids is not None and tokens_per_req is not None:
-                # Split input_ids using actual per-request token counts (variable-length)
-                start_idx = 0
-                for token_count in tokens_per_req:
-                    end_idx = start_idx + token_count
-                    request_codes = input_ids[start_idx:end_idx]
+                if sum(tokens_per_req) != input_ids.shape[0]:
+                    raise ValueError("tokens_per_req must sum to the total number of codec tokens")
+                for request_codes in torch.split(input_ids, tokens_per_req):
                     # Reshape to [1, 16, seq_len] for each request
                     codes.append(request_codes.reshape(1, 16, -1))
-                    start_idx = end_idx
             elif input_ids is not None:
                 # Fallback: equal split (for backward compatibility)
                 total_tokens = input_ids.shape[0]
                 tokens_per_request = total_tokens // batch_size
-                for i in range(batch_size):
-                    start_idx = i * tokens_per_request
-                    end_idx = start_idx + tokens_per_request
-                    request_codes = input_ids[start_idx:end_idx]
+                for idx, request_codes in enumerate(torch.split(input_ids, tokens_per_request)):
+                    if idx >= batch_size:
+                        break
                     codes.append(request_codes.reshape(1, 16, -1))
             else:
                 # for profile, we use max length from inputs_embeds
