@@ -208,8 +208,7 @@ class TestLoadStageConfigs:
     def test_load_stage_configs_from_yaml_basic(self, tmp_path):
         """Test loading stage configs from YAML file"""
         config_file = tmp_path / "test_config.yaml"
-        config_content = """
-stage_args:
+        config_content = """stage_args:
   - stage_id: 0
     engine_args:
       model: test_model
@@ -224,8 +223,7 @@ stage_args:
     def test_load_stage_configs_with_base_engine_args(self, tmp_path):
         """Test merging base_engine_args with stage-specific args"""
         config_file = tmp_path / "test_config.yaml"
-        config_content = """
-stage_args:
+        config_content = """stage_args:
   - stage_id: 0
     engine_args:
       tensor_parallel_size: 2

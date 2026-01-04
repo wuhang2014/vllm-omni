@@ -459,8 +459,8 @@ class TestOrchestratorMetrics:
         stage_metrics = {"num_tokens_in": 10, "num_tokens_out": 50, "stage_gen_time_ms": 100.0}
         metrics.on_stage_metrics(0, "req-1", stage_metrics)
 
-        req_start = time.time()
-        time.sleep(0.01)  # Small delay to ensure time difference
+        # Simulate request start time slightly before current time
+        req_start = wall_start - 0.1
 
         metrics.on_finalize_request(0, "req-1", req_start)
 
