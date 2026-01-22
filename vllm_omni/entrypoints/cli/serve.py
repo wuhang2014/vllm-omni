@@ -89,6 +89,12 @@ class OmniServeCommand(CLISubcommand):
             help="Path to the stage configs file. If not specified, the stage configs will be loaded from the model.",
         )
         omni_config_group.add_argument(
+            "--stage-id",
+            type=int,
+            default=None,
+            help="Select and launch a single stage by stage_id.",
+        )
+        omni_config_group.add_argument(
             "--stage-init-timeout",
             type=int,
             default=300,

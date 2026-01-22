@@ -200,11 +200,25 @@ class OmniBase:
         batch_timeout = kwargs.get("batch_timeout", 10)
         stage_configs_path = kwargs.get("stage_configs_path", None)
         log_stats = kwargs.get("log_stats", False)
+        single_stage_id = kwargs.get("stage_id", None)
 
         ### base engine args
         tokenizer = kwargs.get("tokenizer", None)
 
         base_engine_args = {"tokenizer": tokenizer} if tokenizer is not None else None
+
+        parallel_keys = [
+            "tensor_parallel_size",
+            "pipeline_parallel_size",
+            "data_parallel_size",
+            "data_parallel_size_local",
+            "data_parallel_backend",
+            "distributed_executor_backend",
+        ]
+        parallel_overrides = {k: kwargs[k] for k in parallel_keys if k in kwargs and kwargs[k] is not None}
+        if parallel_overrides:
+            base_engine_args = base_engine_args or {}
+            base_engine_args.update(parallel_overrides)
 
         # Load stage configurations from YAML
         if stage_configs_path is None:
@@ -216,6 +230,23 @@ class OmniBase:
         else:
             self.config_path = stage_configs_path
             self.stage_configs = load_stage_configs_from_yaml(stage_configs_path, base_engine_args=base_engine_args)
+
+        if single_stage_id is not None:
+            filtered_stage_configs = []
+            for cfg in self.stage_configs:
+                sid = getattr(cfg, "stage_id", None)
+                if sid != single_stage_id:
+                    continue
+                filtered_stage_configs.append(cfg)
+
+            if not filtered_stage_configs:
+                raise ValueError(f"No stage matches the selection criteria: stage_id={single_stage_id}.")
+
+            self.stage_configs = OmegaConf.create(filtered_stage_configs)
+            logger.info(
+                "Running in single-stage mode with filters: stage_id=%s",
+                single_stage_id,
+            )
 
         # Initialize connectors
         self.omni_transfer_config, self.connectors = initialize_orchestrator_connectors(
@@ -233,6 +264,8 @@ class OmniBase:
         def _build_stage(idx_cfg: tuple[int, Any]) -> tuple[int, OmniStage]:
             idx, cfg = idx_cfg
             return idx, OmniStage(cfg, stage_init_timeout=stage_init_timeout)
+
+        logger.info(f"====== stage configs:\n{pformat(OmegaConf.to_container(self.stage_configs))}")
 
         with ThreadPoolExecutor(max_workers=min(len(self.stage_configs), max(1, os.cpu_count() or 1))) as executor:
             futures = [executor.submit(_build_stage, (idx, cfg)) for idx, cfg in enumerate(self.stage_configs)]

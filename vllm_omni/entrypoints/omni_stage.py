@@ -980,7 +980,7 @@ async def _stage_worker_async(
 
     stage_id = stage_payload["stage_id"]
     engine_args = stage_payload.get("engine_args", {})
-    runtime_cfg = stage_payload.get("runtime", {})
+    # runtime_cfg = stage_payload.get("runtime", {})
     shm_threshold_bytes = int(stage_payload.get("shm_threshold_bytes", 65536))
     connectors_config = stage_payload.get("connectors_config", {})
     stage_type = stage_payload.get("stage_type", "llm")
@@ -1001,7 +1001,7 @@ async def _stage_worker_async(
         from vllm_omni.utils import detect_device_type
 
         device_type = detect_device_type()
-        set_stage_devices(stage_id, runtime_cfg.get("devices"), device_type=device_type)
+        # set_stage_devices(stage_id, runtime_cfg.get("devices"), device_type=device_type)
     except Exception as e:
         logger.warning("Device setup failed: %s", e)
 
@@ -1066,7 +1066,7 @@ async def _stage_worker_async(
                 # Sort devices_to_lock to prevent deadlock (all processes acquire locks in same order)
                 devices_to_lock = sorted(devices_to_lock)
 
-                logger.debug(
+                logger.info(
                     "Parallel config: TP=%d, PP=%d, DP=%d, PCP=%d; will lock %d devices: %s",
                     tensor_parallel_size,
                     pipeline_parallel_size,
