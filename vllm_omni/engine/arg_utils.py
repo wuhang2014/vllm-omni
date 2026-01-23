@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeTextConfig
+from vllm.config.vllm import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config
@@ -126,6 +127,13 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
     engine_output_type: str | None = None
     hf_config_name: str | None = None
 
+    class _OmniAsyncVllmConfig(VllmConfig):
+        @property
+        def needs_dp_coordinator(self) -> bool:  # noqa: D401
+            """Disable DP coordinator for async omni stages."""
+            logger.info("_OmniAsyncVllmConfig.needs_dp_coordinator called")
+            return False
+
     def draw_hf_text_config(self, config_dict: dict) -> Qwen3OmniMoeTextConfig:
         # transformers' get_text_config method is used to get the text config from thinker_config.
         # to handle the case that each model stage has their own text config,
@@ -175,3 +183,18 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
         omni_config.hf_config.architectures = omni_config.architectures
 
         return omni_config
+
+    def create_engine_config(
+        self,
+        usage_context=None,
+        headless: bool = False,
+    ) -> VllmConfig:
+        base_config = super().create_engine_config(
+            usage_context=usage_context,
+            headless=headless,
+        )
+
+        # Swap in the omni-specific VllmConfig subclass to override
+        # the DP coordinator requirement without re-running config init.
+        base_config.__class__ = self._OmniAsyncVllmConfig
+        return base_config
