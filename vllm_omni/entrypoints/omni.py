@@ -3,6 +3,7 @@
 import json
 import multiprocessing as mp
 import os
+import threading
 import time
 import uuid
 import weakref
@@ -12,6 +13,7 @@ from dataclasses import asdict
 from pprint import pformat
 from typing import Any
 
+import zmq
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 from vllm.inputs import PromptType
@@ -38,12 +40,22 @@ from vllm_omni.entrypoints.utils import (
     load_stage_configs_from_yaml,
     resolve_model_config_path,
 )
+from vllm_omni.entrypoints.zmq_utils import ZmqQueue, ZmqQueueSpec
 from vllm_omni.outputs import OmniRequestOutput
 
 logger = init_logger(__name__)
 
 
-def _weak_close_cleanup(stage_list, stage_in_queues, ray_pg):
+def _weak_close_cleanup(
+    stage_list,
+    stage_in_queues,
+    stage_out_queues,
+    ray_pg,
+    zmq_ctx=None,
+    handshake_stop: threading.Event | None = None,
+    handshake_socket: zmq.Socket | None = None,
+    handshake_thread: threading.Thread | None = None,
+):
     """Weak reference cleanup function for OmniBase instances."""
     if stage_list:
         for q in stage_in_queues:
@@ -51,12 +63,45 @@ def _weak_close_cleanup(stage_list, stage_in_queues, ray_pg):
                 q.put_nowait(SHUTDOWN_TASK)
             except Exception as e:
                 logger.warning(f"Failed to send shutdown signal to stage input queue: {e}")
+            try:
+                close_fn = getattr(q, "close", None)
+                if callable(close_fn):
+                    close_fn()
+            except Exception:
+                pass
+        for q in stage_out_queues:
+            try:
+                close_fn = getattr(q, "close", None)
+                if callable(close_fn):
+                    close_fn()
+            except Exception:
+                pass
         for stage in stage_list:
             try:
                 stage.stop_stage_worker()
             except Exception as e:
                 logger.warning(f"Failed to stop stage worker: {e}")
     try_close_ray(ray_pg)
+    if handshake_stop is not None:
+        try:
+            handshake_stop.set()
+        except Exception:
+            pass
+    if handshake_socket is not None:
+        try:
+            handshake_socket.close(0)
+        except Exception:
+            pass
+    if handshake_thread is not None:
+        try:
+            handshake_thread.join(timeout=1.0)
+        except Exception:
+            pass
+    if zmq_ctx is not None:
+        try:
+            zmq_ctx.term()
+        except Exception:
+            pass
 
 
 def _dummy_snapshot_download(model_id):
@@ -109,12 +154,22 @@ class OmniBase:
 
         # Stage management attributes
         self.stage_list: list[OmniStage] = []
-        self._stage_in_queues: list[mp.Queue] = []
-        self._stage_out_queues: list[mp.Queue] = []
+        self._stage_in_queues: list[Any] = []
+        self._stage_out_queues: list[Any] = []
         self._stages_ready: set[int] = set()
         self._ray_pg = None
         self._queue_cls = None
         self._ctx = None
+        self._zmq_ctx: zmq.Context | None = None
+        self._zmq_master_address: str | None = None
+        self._zmq_master_port: int | None = None
+        self._zmq_handshake_socket: zmq.Socket | None = None
+        self._zmq_handshake_thread: threading.Thread | None = None
+        self._zmq_handshake_stop: threading.Event | None = None
+        self._zmq_handshake_specs: dict[int, ZmqQueueSpec] = {}
+        self._zmq_handshake_seen: set[int] = set()
+        self._total_stage_count: int = 0
+        self._single_stage_id: int | None = None
 
         # Initialize stages - each stage will create appropriate instance based on stage_type
         # Stage workers will automatically create OmniLLM or OmniDiffusion instances
@@ -201,6 +256,11 @@ class OmniBase:
         stage_configs_path = kwargs.get("stage_configs_path", None)
         log_stats = kwargs.get("log_stats", False)
         single_stage_id = kwargs.get("stage_id", None)
+        self._zmq_master_address = kwargs.get("omni_master_address", "127.0.0.1")
+        omni_master_port = kwargs.get("omni_master_port", 5555)
+        self._zmq_master_port = int(omni_master_port) if omni_master_port is not None else 5555
+
+        self._single_stage_id = single_stage_id
 
         ### base engine args
         tokenizer = kwargs.get("tokenizer", None)
@@ -230,6 +290,8 @@ class OmniBase:
         else:
             self.config_path = stage_configs_path
             self.stage_configs = load_stage_configs_from_yaml(stage_configs_path, base_engine_args=base_engine_args)
+
+        self._total_stage_count = len(self.stage_configs)
 
         if single_stage_id is not None:
             filtered_stage_configs = []
@@ -282,7 +344,7 @@ class OmniBase:
             self._queue_cls = get_ray_queue_class()
         else:
             self._ctx = mp.get_context("spawn")
-            self._queue_cls = lambda: self._ctx.Queue(maxsize=0)
+            self._queue_cls = None
 
         self._stage_init_timeout = max(0, int(stage_init_timeout))
         self._shm_threshold_bytes = max(0, int(shm_threshold_bytes))
@@ -298,12 +360,43 @@ class OmniBase:
                 number_of_stages=len(self.stage_list), address=self.ray_address, strategy="PACK"
             )
 
+        if self.worker_backend != "ray" and self._zmq_ctx is None:
+            self._zmq_ctx = zmq.Context()
+
+        if self.worker_backend != "ray":
+            self._ensure_zmq_handshake_server()
+
+        base_port = int(self._zmq_master_port or 5555) + 1
+        if self.worker_backend != "ray":
+            self._zmq_handshake_specs = {}
+            total_stages = self._total_stage_count or len(self.stage_list)
+            for sid in range(total_stages):
+                out_endpoint = f"tcp://{self._zmq_master_address}:{base_port + sid * 2 + 1}"
+                self._zmq_handshake_specs[sid] = ZmqQueueSpec(
+                    endpoint=out_endpoint,
+                    socket_type=zmq.PUSH,
+                    bind=False,
+                )
+
         for stage_id, stage in enumerate[OmniStage](self.stage_list):
-            in_q = self._queue_cls()
-            out_q = self._queue_cls()
+            if self.worker_backend == "ray":
+                in_q = self._queue_cls()
+                out_q = self._queue_cls()
+                in_spec = None
+                out_spec = None
+            else:
+                in_endpoint = f"tcp://{self._zmq_master_address}:{base_port + stage_id * 2}"
+                out_endpoint = f"tcp://{self._zmq_master_address}:{base_port + stage_id * 2 + 1}"
+                in_q = ZmqQueue(self._zmq_ctx, zmq.PUSH, bind=in_endpoint)
+                out_q = ZmqQueue(self._zmq_ctx, zmq.PULL, bind=out_endpoint)
+                in_spec = ZmqQueueSpec(endpoint=in_endpoint, socket_type=zmq.PULL, bind=False)
+                out_spec = ZmqQueueSpec(endpoint=out_endpoint, socket_type=zmq.PUSH, bind=False)
+
             self._stage_in_queues.append(in_q)
             self._stage_out_queues.append(out_q)
-            stage.attach_queues(in_q, out_q)
+            stage.attach_queues(in_q, out_q, in_q_spec=in_spec, out_q_spec=out_spec)
+            if self.worker_backend != "ray":
+                stage.set_zmq_master(self._zmq_master_address or "127.0.0.1", self._zmq_master_port or 5555)
 
             stage_connectors_config = get_stage_connector_config(
                 self.omni_transfer_config,
@@ -322,6 +415,11 @@ class OmniBase:
             )
 
             logger.debug(f"[{self._name}] Stage-{stage_id} process started")
+
+        if self._single_stage_id is not None and self.worker_backend != "ray":
+            total_stages = self._total_stage_count or len(self.stage_list)
+            expected = set(range(total_stages)) - {int(self._single_stage_id)}
+            self._wait_for_zmq_handshakes(expected, timeout=self._stage_init_timeout)
 
     def _process_stage_ready(self, stage: OmniStage, stage_id: int, result: dict[str, Any]) -> None:
         self._stages_ready.add(stage_id)
@@ -475,8 +573,98 @@ class OmniBase:
 
     def close(self) -> None:
         """Close all stage processes and clean up resources."""
+        self._stop_zmq_handshake_server()
         if hasattr(self, "_weak_finalizer"):
             self._weak_finalizer()
+
+    def _ensure_zmq_handshake_server(self) -> None:
+        if self._zmq_handshake_thread is not None or self._zmq_ctx is None:
+            return
+        if not self._zmq_master_address or self._zmq_master_port is None:
+            return
+
+        endpoint = f"tcp://{self._zmq_master_address}:{int(self._zmq_master_port)}"
+        self._zmq_handshake_stop = threading.Event()
+        self._zmq_handshake_socket = self._zmq_ctx.socket(zmq.REP)
+        self._zmq_handshake_socket.linger = 0
+        self._zmq_handshake_socket.bind(endpoint)
+
+        def _serve() -> None:
+            poller = zmq.Poller()
+            poller.register(self._zmq_handshake_socket, zmq.POLLIN)
+            while not self._zmq_handshake_stop.is_set():
+                try:
+                    events = dict(poller.poll(100))
+                except Exception:
+                    continue
+                if events.get(self._zmq_handshake_socket) != zmq.POLLIN:
+                    continue
+                try:
+                    msg = self._zmq_handshake_socket.recv_pyobj()
+                except Exception:
+                    continue
+
+                resp: dict[str, Any] = {"ok": False}
+                try:
+                    if isinstance(msg, dict) and msg.get("type") == "handshake":
+                        stage_id = int(msg.get("stage_id"))
+                        out_spec = self._zmq_handshake_specs.get(stage_id)
+                        if out_spec is None:
+                            resp = {"ok": False, "error": f"unknown stage_id: {stage_id}"}
+                        else:
+                            self._zmq_handshake_seen.add(stage_id)
+                            resp = {"ok": True, "out_spec": out_spec}
+                    else:
+                        resp = {"ok": False, "error": "invalid handshake payload"}
+                except Exception as e:
+                    resp = {"ok": False, "error": str(e)}
+
+                try:
+                    self._zmq_handshake_socket.send_pyobj(resp)
+                except Exception:
+                    pass
+
+            try:
+                poller.unregister(self._zmq_handshake_socket)
+            except Exception:
+                pass
+
+        self._zmq_handshake_thread = threading.Thread(target=_serve, daemon=True)
+        self._zmq_handshake_thread.start()
+
+    def _stop_zmq_handshake_server(self) -> None:
+        if self._zmq_handshake_stop is not None:
+            try:
+                self._zmq_handshake_stop.set()
+            except Exception:
+                pass
+        if self._zmq_handshake_socket is not None:
+            try:
+                self._zmq_handshake_socket.close(0)
+            except Exception:
+                pass
+            self._zmq_handshake_socket = None
+        if self._zmq_handshake_thread is not None:
+            try:
+                self._zmq_handshake_thread.join(timeout=1.0)
+            except Exception:
+                pass
+            self._zmq_handshake_thread = None
+
+    def _wait_for_zmq_handshakes(self, expected: set[int], timeout: int = 60) -> None:
+        if not expected:
+            return
+        deadline = time.time() + max(0, int(timeout))
+        while not expected.issubset(self._zmq_handshake_seen):
+            if time.time() >= deadline:
+                missing = sorted(expected - self._zmq_handshake_seen)
+                logger.warning(
+                    "[%s] Handshake timeout waiting for stages: %s",
+                    self._name,
+                    missing,
+                )
+                return
+            time.sleep(1.0)
 
     @property
     def _name(self) -> str:
@@ -525,7 +713,12 @@ class Omni(OmniBase):
             _weak_close_cleanup,
             self.stage_list,
             self._stage_in_queues,
+            self._stage_out_queues,
             self._ray_pg,
+            self._zmq_ctx,
+            self._zmq_handshake_stop,
+            self._zmq_handshake_socket,
+            self._zmq_handshake_thread,
         )
 
     def generate(
