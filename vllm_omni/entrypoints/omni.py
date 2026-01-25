@@ -293,23 +293,6 @@ class OmniBase:
 
         self._total_stage_count = len(self.stage_configs)
 
-        if single_stage_id is not None:
-            filtered_stage_configs = []
-            for cfg in self.stage_configs:
-                sid = getattr(cfg, "stage_id", None)
-                if sid != single_stage_id:
-                    continue
-                filtered_stage_configs.append(cfg)
-
-            if not filtered_stage_configs:
-                raise ValueError(f"No stage matches the selection criteria: stage_id={single_stage_id}.")
-
-            self.stage_configs = OmegaConf.create(filtered_stage_configs)
-            logger.info(
-                "Running in single-stage mode with filters: stage_id=%s",
-                single_stage_id,
-            )
-
         # Initialize connectors
         self.omni_transfer_config, self.connectors = initialize_orchestrator_connectors(
             self.config_path, worker_backend=worker_backend, shm_threshold_bytes=shm_threshold_bytes
@@ -379,6 +362,11 @@ class OmniBase:
                 )
 
         for stage_id, stage in enumerate[OmniStage](self.stage_list):
+            if self._single_stage_id is not None and stage_id != int(self._single_stage_id):
+                logger.info(
+                    f"[{self._name}] Skipping initialization of stage-{stage_id} due to single_stage_id setting"
+                )
+                continue
             if self.worker_backend == "ray":
                 in_q = self._queue_cls()
                 out_q = self._queue_cls()
