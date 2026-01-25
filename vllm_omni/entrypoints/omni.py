@@ -362,11 +362,6 @@ class OmniBase:
                 )
 
         for stage_id, stage in enumerate[OmniStage](self.stage_list):
-            if self._single_stage_id is not None and stage_id != int(self._single_stage_id):
-                logger.info(
-                    f"[{self._name}] Skipping initialization of stage-{stage_id} due to single_stage_id setting"
-                )
-                continue
             if self.worker_backend == "ray":
                 in_q = self._queue_cls()
                 out_q = self._queue_cls()
@@ -390,6 +385,12 @@ class OmniBase:
                 self.omni_transfer_config,
                 stage_id,
             )
+
+            if self._single_stage_id is not None and stage_id != int(self._single_stage_id):
+                logger.info(
+                    f"[{self._name}] Skipping initialization of stage-{stage_id} worker due to single_stage_id setting"
+                )
+                continue
 
             stage.init_stage_worker(
                 model,
