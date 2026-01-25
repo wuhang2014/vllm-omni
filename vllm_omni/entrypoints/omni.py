@@ -338,7 +338,7 @@ class OmniBase:
         self.stage_list = [st for _, st in results]
         self.default_sampling_params_list = [st.default_sampling_params for st in self.stage_list]
         self.output_modalities = [st.final_output_type for st in self.stage_list]
-        logger.debug(f"[{self._name}] Loaded {len(self.stage_list)} stages")
+        logger.info(f"[{self._name}] Loaded {len(self.stage_list)} stages")
 
         if self.worker_backend == "ray":
             self._queue_cls = get_ray_queue_class()
@@ -614,6 +614,11 @@ class OmniBase:
                         else:
                             self._zmq_handshake_seen.add(stage_id)
                             resp = {"ok": True, "out_spec": out_spec}
+                            logger.info(
+                                "[%s] Handshake received from stage-%s",
+                                self._name,
+                                stage_id,
+                            )
                     else:
                         resp = {"ok": False, "error": "invalid handshake payload"}
                 except Exception as e:
