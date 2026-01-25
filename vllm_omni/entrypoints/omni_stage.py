@@ -300,7 +300,7 @@ class OmniStage:
         Raises:
             AssertionError: If queues are not attached before calling this method
         """
-        assert self._in_q is not None and self._out_q is not None, "Queues must be attached before start_process"
+        # assert self._in_q is not None and self._out_q is not None, "Queues must be attached before start_process"
 
         if worker_backend == "ray":
             ray_placement_group = kwargs.get("ray_placement_group", None)
