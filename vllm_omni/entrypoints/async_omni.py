@@ -290,7 +290,8 @@ class AsyncOmni(OmniBase):
         async with self._pause_cond:
             await self._pause_cond.wait_for(lambda: not self._paused)
 
-        logger.debug(f"[{self._name}] generate() called")
+        logger.info(f"[{self._name}] generate() called")
+        logger.info(f"====== {self.stage_list=}")
         try:
             # Start output handler on the first call to generate()
             self._run_output_handler()
