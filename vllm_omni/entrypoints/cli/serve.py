@@ -31,7 +31,7 @@ from vllm_omni.entrypoints.utils import (
     load_stage_configs_from_yaml,
     resolve_model_config_path,
 )
-from vllm_omni.entrypoints.zmq_utils import ZmqQueue, ZmqQueueSpec
+from vllm_omni.entrypoints.zmq_utils import ZmqQueueSpec
 
 logger = init_logger(__name__)
 
@@ -326,8 +326,8 @@ def run_headless(args: argparse.Namespace) -> None:
     in_q_spec = ZmqQueueSpec(endpoint=in_endpoint, socket_type=zmq.PULL, bind=False)
     out_q_spec = ZmqQueueSpec(endpoint=out_endpoint, socket_type=zmq.PUSH, bind=False)
     zmq_ctx = zmq.Context()
-    in_q = ZmqQueue(zmq_ctx, zmq.PULL, connect=in_endpoint)
-    out_q = ZmqQueue(zmq_ctx, zmq.PUSH, connect=out_endpoint)
+    in_q = None
+    out_q = None
 
     shutdown_requested = False
 

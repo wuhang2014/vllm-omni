@@ -215,8 +215,8 @@ class OmniStage:
     # ----------------- New Orchestration APIs -----------------
     def attach_queues(
         self,
-        in_q: ZmqQueue | mp.queues.Queue,
-        out_q: ZmqQueue | mp.queues.Queue,
+        in_q: ZmqQueue | mp.queues.Queue | None,
+        out_q: ZmqQueue | mp.queues.Queue | None,
         *,
         in_q_spec: ZmqQueueSpec | None = None,
         out_q_spec: ZmqQueueSpec | None = None,
@@ -1270,7 +1270,7 @@ async def _stage_worker_async(
             logger.debug("Failed to set up sequential initialization lock: %s", e)
 
     # Init engine based on stage_type
-    logger.debug(
+    logger.info(
         "[Stage-%s] Initializing %s engine with args keys=%s",
         stage_id,
         stage_type,
@@ -1463,6 +1463,7 @@ async def _stage_worker_async(
         try:
             task = in_q.get_nowait()
             task_type = task.get("type", OmniStageTaskType.GENERATE)
+            logger.info(f"Received task type: {task_type}")
             if task_type == OmniStageTaskType.SHUTDOWN:
                 logger.debug("Received shutdown signal")
                 stage_engine.shutdown()
