@@ -137,8 +137,8 @@ class OmniStage:
         except TypeError as error:
             raise TypeError(f"Invalid default_sampling_params for stage {self.stage_id}: {error}") from error
         # Runtime orchestration state (added)
-        self._in_q: mp.Queue | asyncio.Queue | None = None
-        self._out_q: mp.Queue | asyncio.Queue | None = None
+        self._in_q: mp.queues.Queue | asyncio.Queue | None = None
+        self._out_q: mp.queues.Queue | asyncio.Queue | None = None
         self._proc: mp.Process | None = None
         self._shm_threshold_bytes: int = 65536
         self._stage_init_timeout: int = stage_init_timeout
@@ -200,7 +200,7 @@ class OmniStage:
         self.engine_outputs = engine_outputs
 
     # ----------------- New Orchestration APIs -----------------
-    def attach_queues(self, in_q: mp.Queue | asyncio.Queue, out_q: mp.Queue | asyncio.Queue) -> None:
+    def attach_queues(self, in_q: mp.queues.Queue | asyncio.Queue, out_q: mp.queues.Queue | asyncio.Queue) -> None:
         """Attach input and output queues for IPC communication.
 
         Args:
@@ -497,8 +497,8 @@ class OmniStage:
 def _stage_worker(
     model: str,
     stage_payload: dict[str, Any],
-    in_q: mp.Queue,
-    out_q: mp.Queue,
+    in_q: mp.queues.Queue,
+    out_q: mp.queues.Queue,
     batch_timeout: int = 10,
     stage_init_timeout: int = 300,
 ) -> None:
