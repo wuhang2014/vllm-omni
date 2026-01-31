@@ -42,7 +42,7 @@ from vllm_omni.outputs import OmniRequestOutput
 logger = init_logger(__name__)
 
 
-def _weak_close_cleanup_async(stage_list, stage_in_queues, ray_pg, output_handler):
+def _weak_close_cleanup_async(stage_list, stage_in_queues, stage_out_queues, ray_pg, output_handler, zmq_ctx=None):
     """Weak reference cleanup function for AsyncOmni instances."""
     if stage_list:
         for q in stage_in_queues:
@@ -50,6 +50,19 @@ def _weak_close_cleanup_async(stage_list, stage_in_queues, ray_pg, output_handle
                 q.put_nowait(SHUTDOWN_TASK)
             except Exception as e:
                 logger.warning(f"Failed to send shutdown signal to stage input queue: {e}")
+            try:
+                close_fn = getattr(q, "close", None)
+                if callable(close_fn):
+                    close_fn()
+            except Exception:
+                pass
+        for q in stage_out_queues:
+            try:
+                close_fn = getattr(q, "close", None)
+                if callable(close_fn):
+                    close_fn()
+            except Exception:
+                pass
         for stage in stage_list:
             try:
                 stage.stop_stage_worker()
@@ -59,6 +72,11 @@ def _weak_close_cleanup_async(stage_list, stage_in_queues, ray_pg, output_handle
     # Cancel output handler
     if output_handler is not None:
         output_handler.cancel()
+    if zmq_ctx is not None:
+        try:
+            zmq_ctx.term()
+        except Exception:
+            pass
 
 
 class AsyncOmni(OmniBase):
@@ -112,8 +130,10 @@ class AsyncOmni(OmniBase):
             _weak_close_cleanup_async,
             self.stage_list,
             self._stage_in_queues,
+            self._stage_out_queues,
             self._ray_pg,
             self.output_handler,
+            self._zmq_ctx,
         )
 
     def _create_default_diffusion_stage_cfg(self, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -272,7 +292,8 @@ class AsyncOmni(OmniBase):
         async with self._pause_cond:
             await self._pause_cond.wait_for(lambda: not self._paused)
 
-        logger.debug(f"[{self._name}] generate() called")
+        logger.info(f"[{self._name}] generate() called")
+        logger.info(f"====== {self.stage_list=}")
         try:
             # Start output handler on the first call to generate()
             self._run_output_handler()
