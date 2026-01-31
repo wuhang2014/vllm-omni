@@ -307,10 +307,15 @@ class OmniStage:
         else:
             self._shm_threshold_bytes = shm_threshold_bytes
 
+        ignore_runtime_config = kwargs.get("ignore_runtime_config", False)
+
         ctx = ctx or mp.get_context("spawn")
         # Prepare lightweight dict config for worker
         engine_args = _to_dict(self.engine_args)
-        runtime_cfg = _to_dict(getattr(self.stage_config, "runtime", {}))
+        if ignore_runtime_config:
+            runtime_cfg = {}
+        else:
+            runtime_cfg = _to_dict(getattr(self.stage_config, "runtime", {}))
         stage_payload: dict[str, Any] = {
             "stage_id": self.stage_id,
             "engine_args": engine_args,
