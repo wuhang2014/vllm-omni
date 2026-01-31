@@ -197,6 +197,8 @@ def load_stage_configs_from_model(model: str, base_engine_args: dict | None = No
     """
     if base_engine_args is None:
         base_engine_args = {}
+    if "dispatch_function" in base_engine_args:
+        del base_engine_args["dispatch_function"]
     stage_config_path = resolve_model_config_path(model)
     if stage_config_path is None:
         return []

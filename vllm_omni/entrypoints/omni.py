@@ -259,23 +259,7 @@ class OmniBase:
 
         self._single_stage_id = single_stage_id
 
-        ### base engine args
-        tokenizer = kwargs.get("tokenizer", None)
-
-        base_engine_args = {"tokenizer": tokenizer} if tokenizer is not None else None
-
-        parallel_keys = [
-            "tensor_parallel_size",
-            "pipeline_parallel_size",
-            "data_parallel_size",
-            "data_parallel_size_local",
-            "data_parallel_backend",
-            "distributed_executor_backend",
-        ]
-        parallel_overrides = {k: kwargs[k] for k in parallel_keys if k in kwargs and kwargs[k] is not None}
-        if parallel_overrides:
-            base_engine_args = base_engine_args or {}
-            base_engine_args.update(parallel_overrides)
+        base_engine_args = kwargs
 
         # Load stage configurations from YAML
         if stage_configs_path is None:

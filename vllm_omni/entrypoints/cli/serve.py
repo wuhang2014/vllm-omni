@@ -305,23 +305,8 @@ def run_headless(args: argparse.Namespace) -> None:
         raise ValueError("model must be specified in headless mode")
     model = omni_snapshot_download(model)
 
-    tokenizer = getattr(args, "tokenizer", None)
-    base_engine_args = {"tokenizer": tokenizer} if tokenizer is not None else None
-
-    parallel_keys = [
-        "tensor_parallel_size",
-        "pipeline_parallel_size",
-        "data_parallel_size",
-        "data_parallel_size_local",
-        "data_parallel_backend",
-        "distributed_executor_backend",
-    ]
-    parallel_overrides = {
-        k: getattr(args, k) for k in parallel_keys if hasattr(args, k) and getattr(args, k) is not None
-    }
-    if parallel_overrides:
-        base_engine_args = base_engine_args or {}
-        base_engine_args.update(parallel_overrides)
+    base_engine_args = vars(args)
+    base_engine_args.pop("model", None)
 
     stage_configs_path = getattr(args, "stage_configs_path", None)
     if stage_configs_path is None:

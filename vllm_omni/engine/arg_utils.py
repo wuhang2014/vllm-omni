@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeTextConfig
 from vllm.engine.arg_utils import EngineArgs
@@ -197,6 +197,12 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
     def __post_init__(self) -> None:
         load_omni_general_plugins()
         super().__post_init__()
+
+    @classmethod
+    def from_kwargs(cls, **kwargs) -> "AsyncOmniEngineArgs":
+        valid_fields = {f.name for f in fields(cls)}
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_fields}
+        return cls(**filtered_kwargs)
 
     def _ensure_omni_models_registered(self):
         if hasattr(self, "_omni_models_registered"):
