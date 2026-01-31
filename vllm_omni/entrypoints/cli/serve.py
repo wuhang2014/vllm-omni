@@ -392,6 +392,7 @@ def run_headless(args: argparse.Namespace) -> None:
             batch_timeout=int(getattr(args, "batch_timeout", 10)),
             connectors_config=connectors_config,
             worker_backend="multi_process",
+            ignore_runtime_config=True,
         )
         if stage._proc is not None:
             stage._proc.join()
