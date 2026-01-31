@@ -137,8 +137,8 @@ class OmniStage:
         except TypeError as error:
             raise TypeError(f"Invalid default_sampling_params for stage {self.stage_id}: {error}") from error
         # Runtime orchestration state (added)
-        self._in_q: mp.Queue | None = None
-        self._out_q: mp.Queue | None = None
+        self._in_q: mp.Queue | asyncio.Queue | None = None
+        self._out_q: mp.Queue | asyncio.Queue | None = None
         self._proc: mp.Process | None = None
         self._shm_threshold_bytes: int = 65536
         self._stage_init_timeout: int = stage_init_timeout
@@ -200,7 +200,7 @@ class OmniStage:
         self.engine_outputs = engine_outputs
 
     # ----------------- New Orchestration APIs -----------------
-    def attach_queues(self, in_q: mp.Queue, out_q: mp.Queue) -> None:
+    def attach_queues(self, in_q: mp.Queue | asyncio.Queue, out_q: mp.Queue | asyncio.Queue) -> None:
         """Attach input and output queues for IPC communication.
 
         Args:
@@ -222,7 +222,17 @@ class OmniStage:
         # Wait for result from worker
         try:
             # Profiling stop might take time to flush files, give it 180s
-            response = self._out_q.get(timeout=60000)
+            if isinstance(self._out_q, asyncio.Queue):
+                try:
+                    response = asyncio.run(asyncio.wait_for(self._out_q.get(), timeout=60000))
+                except RuntimeError:
+                    logger.error(
+                        "[Stage-%s] stop_profile called in running event loop; use stop_profile_async instead",
+                        self.stage_id,
+                    )
+                    return {}
+            else:
+                response = self._out_q.get(timeout=60000)
 
             if isinstance(response, dict):
                 if response.get("type") == "profiler_result":
@@ -792,46 +802,38 @@ def _stage_worker(
         start_time = _time.time()
         if max_batch_size > 1:
             while len(batch_tasks) < max_batch_size:
-                if not in_q.empty():
-                    extra = in_q.get_nowait()
-                    if extra == SHUTDOWN_TASK:
-                        in_q.put(SHUTDOWN_TASK)
-                        break
-                    # Handle profiler commands that arrive during batching
-                    extra_type = extra.get("type") if isinstance(extra, dict) else None
-                    if is_profiler_task(extra_type):
-                        p_data = handle_profiler_task_local(extra_type)
-                        if extra_type == OmniStageTaskType.PROFILER_STOP:
-                            out_q.put({"type": "profiler_result", "data": p_data})
-                        continue
-                    # Ensure that all tasks have the same sampling params
-                    # If no, put them in a temporary container and add back to queue
-                    # This should be always true, because user only calls omni.generate() once and it blocks
-                    # User can only pass one sampling param object, but the list of prompts are separated.
-                    if task.get("sampling_params") != extra.get("sampling_params"):
-                        logger.warning(
-                            """In offline mode, expect all prompts in one `omni.generate()` call to share same sampling params"""  # noqa: E501 # line too long
-                            f"""However, prompt {task.get("engine_inputs")} has sampling params {task.get("sampling_params")}, """  # noqa: E501 # line too long
-                            f"""whereas the prompt {extra.get("engine_inputs")} has sampling params {extra.get("sampling_params")}."""  # noqa: E501 # line too long
-                            """The two tasks cannot be combined in one batch request."""
-                        )
-                        tasks_failed_to_add_to_batch.append(extra)
-                    else:
-                        batch_tasks.append(extra)
-                    end_time = _time.time()
-                    duration = end_time - start_time
-                    if duration > batch_timeout:
-                        break
-                    else:
-                        continue
+                end_time = _time.time()
+                remaining = batch_timeout - (end_time - start_time)
+                if remaining <= 0:
+                    break
+                try:
+                    extra = in_q.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if extra == SHUTDOWN_TASK:
+                    in_q.put(SHUTDOWN_TASK)
+                    break
+                # Handle profiler commands that arrive during batching
+                extra_type = extra.get("type") if isinstance(extra, dict) else None
+                if is_profiler_task(extra_type):
+                    p_data = handle_profiler_task_local(extra_type)
+                    if extra_type == OmniStageTaskType.PROFILER_STOP:
+                        out_q.put({"type": "profiler_result", "data": p_data})
+                    continue
+                # Ensure that all tasks have the same sampling params
+                # If no, put them in a temporary container and add back to queue
+                # This should be always true, because user only calls omni.generate() once and it blocks
+                # User can only pass one sampling param object, but the list of prompts are separated.
+                if task.get("sampling_params") != extra.get("sampling_params"):
+                    logger.warning(
+                        """In offline mode, expect all prompts in one `omni.generate()` call to share same sampling params"""  # noqa: E501 # line too long
+                        f"""However, prompt {task.get("engine_inputs")} has sampling params {task.get("sampling_params")}, """  # noqa: E501 # line too long
+                        f"""whereas the prompt {extra.get("engine_inputs")} has sampling params {extra.get("sampling_params")}."""  # noqa: E501 # line too long
+                        """The two tasks cannot be combined in one batch request."""
+                    )
+                    tasks_failed_to_add_to_batch.append(extra)
                 else:
-                    end_time = _time.time()
-                    duration = end_time - start_time
-                    _time.sleep(0.05)
-                    if duration > batch_timeout:
-                        break
-                    else:
-                        continue
+                    batch_tasks.append(extra)
         for task_to_readd in tasks_failed_to_add_to_batch:
             in_q.put(task_to_readd)
         # Ensure that the popped tasks are with identical sampling params. Take one of them.
@@ -1048,6 +1050,8 @@ async def _stage_worker_async(
 
     in_q = omni_stage._in_q
     out_q = omni_stage._out_q
+    assert isinstance(in_q, asyncio.Queue), "Async stage requires in_q to be asyncio.Queue"
+    assert isinstance(out_q, asyncio.Queue), "Async stage requires out_q to be asyncio.Queue"
 
     # Aggregates for running average
     _agg_total_tokens = 0
@@ -1335,10 +1339,11 @@ async def _stage_worker_async(
         # Only add is_tracing_enabled for LLM engines
         if stage_type != "diffusion":
             stage_ready_payload["is_tracing_enabled"] = await stage_engine.is_tracing_enabled()
-        out_q.put(stage_ready_payload)
+        await out_q.put(stage_ready_payload)
     except Exception as e:
         logger.warning("Failed to send stage ready signal: %s", e)
     generation_out_q = asyncio.Queue()
+    async_in_q: asyncio.Queue[dict[str, Any]] = in_q
 
     # Batch processing loop
     _rx_bytes_by_rid: dict[Any, int] = {}
@@ -1398,7 +1403,7 @@ async def _stage_worker_async(
                     await generation_out_q.put((rid, gen_output, _gen_ms))
         except Exception as e:
             logger.exception("Failed on request %s: %s", rid, e)
-            out_q.put(
+            await out_q.put(
                 {
                     "request_id": rid,
                     "stage_id": stage_id,
@@ -1408,8 +1413,22 @@ async def _stage_worker_async(
 
     _batch_gen_t0 = _time.time()
     while True:
-        try:
-            task = in_q.get_nowait()
+        get_in_task = asyncio.create_task(async_in_q.get())
+        get_out_task = asyncio.create_task(generation_out_q.get())
+        done, pending = await asyncio.wait(
+            {get_in_task, get_out_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for pending_task in pending:
+            pending_task.cancel()
+
+        batch_request_outputs: list[Any] = []
+        batch_request_ids: list[Any] = []
+        _gen_ms_list = []
+        batch_metrics: list[Any] = []
+
+        if get_in_task in done:
+            task = get_in_task.result()
             task_type = task.get("type", OmniStageTaskType.GENERATE)
             if task_type == OmniStageTaskType.SHUTDOWN:
                 logger.debug("Received shutdown signal")
@@ -1423,12 +1442,23 @@ async def _stage_worker_async(
             else:
                 asyncio.create_task(generation_single_request(task))
 
-        except queue.Empty:
-            await asyncio.sleep(0.001)
-        batch_request_outputs: list[Any] = []
-        batch_request_ids: list[Any] = []
-        _gen_ms_list = []
-        batch_metrics: list[Any] = []
+        if get_out_task in done:
+            rid, gen_output, _gen_ms = get_out_task.result()
+            _metrics = make_request_stats(
+                [gen_output],
+                _gen_ms,
+                int(_batch_seq),
+                1,  # temporarily set to 1
+                float(_rx_decode_ms_by_rid.get(rid, 0.0)),
+                int(_rx_bytes_by_rid.get(rid, 0)),
+                float(_in_flight_ms_by_rid.get(rid, 0.0)),
+            )
+            batch_metrics.append(_metrics)
+            batch_request_outputs.append(gen_output)
+            _gen_ms_list.append(_gen_ms)
+            batch_request_ids.append(rid)
+            _agg_total_tokens += _metrics.num_tokens_out
+
         while True:
             try:
                 rid, gen_output, _gen_ms = generation_out_q.get_nowait()
@@ -1447,7 +1477,6 @@ async def _stage_worker_async(
                 batch_request_ids.append(rid)
                 _agg_total_tokens += _metrics.num_tokens_out
             except asyncio.QueueEmpty:
-                await asyncio.sleep(0.001)
                 break
 
         if not batch_request_outputs:
@@ -1470,7 +1499,7 @@ async def _stage_worker_async(
                 r_outputs = [output_strip(output, omni_stage)]
                 use_shm, payload = maybe_dump_to_shm(r_outputs, shm_threshold_bytes)
                 if use_shm:
-                    out_q.put(
+                    await out_q.put(
                         {
                             "request_id": rid,
                             "stage_id": stage_id,
@@ -1479,7 +1508,7 @@ async def _stage_worker_async(
                         }
                     )
                 else:
-                    out_q.put(
+                    await out_q.put(
                         {
                             "request_id": rid,
                             "stage_id": stage_id,
@@ -1494,7 +1523,7 @@ async def _stage_worker_async(
                     rid,
                     e,
                 )
-                out_q.put(
+                await out_q.put(
                     {
                         "request_id": rid,
                         "stage_id": stage_id,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import json
 import multiprocessing as mp
 import os
@@ -106,8 +107,8 @@ class OmniBase:
 
         # Stage management attributes
         self.stage_list: list[OmniStage] = []
-        self._stage_in_queues: list[mp.Queue] = []
-        self._stage_out_queues: list[mp.Queue] = []
+        self._stage_in_queues: list[mp.Queue | asyncio.Queue] = []
+        self._stage_out_queues: list[mp.Queue | asyncio.Queue] = []
         self._stages_ready: set[int] = set()
         self._ray_pg = None
         self._queue_cls = None
@@ -268,7 +269,10 @@ class OmniBase:
             self._queue_cls = get_ray_queue_class()
         else:
             self._ctx = mp.get_context("spawn")
-            self._queue_cls = lambda: self._ctx.Queue(maxsize=0)
+            if self.is_async:
+                self._queue_cls = asyncio.Queue
+            else:
+                self._queue_cls = lambda: self._ctx.Queue(maxsize=0)
 
         self._stage_init_timeout = max(0, int(stage_init_timeout))
         self._shm_threshold_bytes = max(0, int(shm_threshold_bytes))
