@@ -18,6 +18,7 @@ from omegaconf import OmegaConf
 from tqdm.auto import tqdm
 from vllm import SamplingParams
 from vllm.logger import init_logger
+from vllm.utils.network_utils import get_open_port
 
 from vllm_omni.distributed.omni_connectors import (
     get_stage_connector_config,
@@ -163,7 +164,7 @@ class OmniBase:
         self._zmq_handshake_socket: zmq.Socket | None = None
         self._zmq_handshake_thread: threading.Thread | None = None
         self._zmq_handshake_stop: threading.Event | None = None
-        self._zmq_handshake_specs: dict[int, ZmqQueueSpec] = {}
+        self._zmq_handshake_specs: dict[int, tuple[ZmqQueueSpec, ZmqQueueSpec]] = {}
         self._zmq_handshake_seen: set[int] = set()
         self._total_stage_count: int = 0
         self._single_stage_id: int | None = None
@@ -264,6 +265,9 @@ class OmniBase:
 
         base_engine_args = {"tokenizer": tokenizer} if tokenizer is not None else None
 
+        # TODO(wuhang):
+        # Remove kwargs as parameters in the future.
+        # Use dataclass directly.
         parallel_keys = [
             "tensor_parallel_size",
             "pipeline_parallel_size",
@@ -329,8 +333,6 @@ class OmniBase:
             idx, cfg = idx_cfg
             return idx, OmniStage(cfg, stage_init_timeout=stage_init_timeout)
 
-        logger.info(f"====== stage configs:\n{pformat(OmegaConf.to_container(self.stage_configs))}")
-
         with ThreadPoolExecutor(max_workers=min(len(self.stage_configs), max(1, os.cpu_count() or 1))) as executor:
             futures = [executor.submit(_build_stage, (idx, cfg)) for idx, cfg in enumerate(self.stage_configs)]
             results: list[tuple[int, OmniStage]] = []
@@ -373,17 +375,33 @@ class OmniBase:
         if self.worker_backend != "ray":
             self._ensure_zmq_handshake_server()
 
-        base_port = int(self._zmq_master_port or 5555) + 1
+        # Pre-allocate ports for all stages using dynamic port allocation
+        stage_ports: dict[int, tuple[int, int]] = {}
         if self.worker_backend != "ray":
-            self._zmq_handshake_specs = {}
             total_stages = self._total_stage_count or len(self.stage_list)
             for sid in range(total_stages):
-                out_endpoint = f"tcp://{self._zmq_master_address}:{base_port + sid * 2 + 1}"
-                self._zmq_handshake_specs[sid] = ZmqQueueSpec(
+                in_port = get_open_port()
+                out_port = get_open_port()
+                stage_ports[sid] = (in_port, out_port)
+                logger.debug(f"[{self._name}] Allocated ports for stage-{sid}: in={in_port}, out={out_port}")
+
+            # Build handshake specs with allocated ports
+            self._zmq_handshake_specs = {}
+            for sid in range(total_stages):
+                in_port, out_port = stage_ports[sid]
+                in_endpoint = f"tcp://{self._zmq_master_address}:{in_port}"
+                out_endpoint = f"tcp://{self._zmq_master_address}:{out_port}"
+                in_spec = ZmqQueueSpec(
+                    endpoint=in_endpoint,
+                    socket_type=zmq.PULL,
+                    bind=False,
+                )
+                out_spec = ZmqQueueSpec(
                     endpoint=out_endpoint,
                     socket_type=zmq.PUSH,
                     bind=False,
                 )
+                self._zmq_handshake_specs[sid] = (in_spec, out_spec)
 
         for stage_id, stage in enumerate[OmniStage](self.stage_list):
             if self.worker_backend == "ray":
@@ -392,8 +410,9 @@ class OmniBase:
                 in_spec = None
                 out_spec = None
             else:
-                in_endpoint = f"tcp://{self._zmq_master_address}:{base_port + stage_id * 2}"
-                out_endpoint = f"tcp://{self._zmq_master_address}:{base_port + stage_id * 2 + 1}"
+                in_port, out_port = stage_ports[stage_id]
+                in_endpoint = f"tcp://{self._zmq_master_address}:{in_port}"
+                out_endpoint = f"tcp://{self._zmq_master_address}:{out_port}"
                 in_q = ZmqQueue(self._zmq_ctx, zmq.PUSH, bind=in_endpoint)
                 out_q = ZmqQueue(self._zmq_ctx, zmq.PULL, bind=out_endpoint)
                 in_spec = ZmqQueueSpec(endpoint=in_endpoint, socket_type=zmq.PULL, bind=False)
@@ -635,12 +654,17 @@ class OmniBase:
                 try:
                     if isinstance(msg, dict) and msg.get("type") == "handshake":
                         stage_id = int(msg.get("stage_id"))
-                        out_spec = self._zmq_handshake_specs.get(stage_id)
-                        if out_spec is None:
+                        specs = self._zmq_handshake_specs.get(stage_id)
+                        if specs is None:
                             resp = {"ok": False, "error": f"unknown stage_id: {stage_id}"}
                         else:
                             self._zmq_handshake_seen.add(stage_id)
-                            resp = {"ok": True, "out_spec": out_spec}
+                            in_spec, out_spec = specs
+                            resp = {
+                                "ok": True,
+                                "in_spec": in_spec,
+                                "out_spec": out_spec,
+                            }
                             logger.info(
                                 "[%s] Handshake received from stage-%s",
                                 self._name,

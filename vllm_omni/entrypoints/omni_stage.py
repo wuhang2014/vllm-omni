@@ -53,7 +53,6 @@ from vllm_omni.entrypoints.zmq_utils import (
     ZmqQueue,
     ZmqQueueSpec,
     create_zmq_queue,
-    request_zmq_out_spec,
 )
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniPromptType, OmniSamplingParams, OmniTokensPrompt
 from vllm_omni.outputs import OmniRequestOutput
@@ -326,9 +325,6 @@ class OmniStage:
             "engine_input_source": self.engine_input_source,
             "final_output": self.final_output,
             "final_output_type": self.final_output_type,
-            "zmq_master_address": self._zmq_master_address,
-            "zmq_master_port": self._zmq_master_port,
-            "zmq_use_handshake": self._zmq_use_handshake,
         }
         try:
             old_env = os.environ.get("VLLM_LOGGING_PREFIX")
@@ -575,21 +571,6 @@ def _stage_worker(
 
     if stage_type != "diffusion":
         _resolve_worker_cls(engine_args)
-
-    zmq_master_address = stage_payload.get("zmq_master_address")
-    zmq_master_port = stage_payload.get("zmq_master_port")
-    use_zmq_handshake = bool(stage_payload.get("zmq_use_handshake", False))
-
-    if use_zmq_handshake and zmq_master_address and zmq_master_port:
-        try:
-            master_endpoint = f"tcp://{zmq_master_address}:{int(zmq_master_port)}"
-            out_q = request_zmq_out_spec(master_endpoint, stage_id)
-        except Exception as e:
-            logger.warning(
-                "[Stage-%s] ZMQ handshake failed, falling back to provided out_q spec: %s",
-                stage_id,
-                e,
-            )
 
     # Resolve ZMQ queue specs if needed
     zmq_ctx = None
@@ -1154,23 +1135,9 @@ async def _stage_worker_async(
     stage_type = stage_payload.get("stage_type", "llm")
     final_output = stage_payload.get("final_output", False)
     final_output_type = stage_payload.get("final_output_type", None)
-    zmq_master_address = stage_payload.get("zmq_master_address")
-    zmq_master_port = stage_payload.get("zmq_master_port")
-    use_zmq_handshake = bool(stage_payload.get("zmq_use_handshake", False))
 
     if stage_type != "diffusion":
         _resolve_worker_cls(engine_args)
-
-    if use_zmq_handshake and zmq_master_address and zmq_master_port:
-        try:
-            master_endpoint = f"tcp://{zmq_master_address}:{int(zmq_master_port)}"
-            out_q = request_zmq_out_spec(master_endpoint, stage_id)
-        except Exception as e:
-            logger.warning(
-                "[Stage-%s] ZMQ handshake failed, falling back to provided out_q spec: %s",
-                stage_id,
-                e,
-            )
 
     # Resolve ZMQ queue specs if needed
     zmq_ctx = None

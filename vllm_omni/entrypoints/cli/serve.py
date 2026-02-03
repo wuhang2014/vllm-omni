@@ -31,7 +31,6 @@ from vllm_omni.entrypoints.utils import (
     load_stage_configs_from_yaml,
     resolve_model_config_path,
 )
-from vllm_omni.entrypoints.zmq_utils import ZmqQueueSpec
 
 logger = init_logger(__name__)
 
@@ -356,13 +355,40 @@ def run_headless(args: argparse.Namespace) -> None:
 
     omni_master_address = getattr(args, "omni_master_address", None) or "127.0.0.1"
     omni_master_port = int(getattr(args, "omni_master_port", 5555) or 5555)
-    base_port = omni_master_port + 1
-    in_endpoint = f"tcp://{omni_master_address}:{base_port + single_stage_id * 2}"
-    out_endpoint = f"tcp://{omni_master_address}:{base_port + single_stage_id * 2 + 1}"
 
-    in_q_spec = ZmqQueueSpec(endpoint=in_endpoint, socket_type=zmq.PULL, bind=False)
-    out_q_spec = ZmqQueueSpec(endpoint=out_endpoint, socket_type=zmq.PUSH, bind=False)
+    # Perform handshake with orchestrator to get dynamically allocated endpoints
     zmq_ctx = zmq.Context()
+    handshake_socket = zmq_ctx.socket(zmq.REQ)
+    handshake_socket.linger = 0
+    handshake_endpoint = f"tcp://{omni_master_address}:{omni_master_port}"
+
+    try:
+        handshake_socket.connect(handshake_endpoint)
+        handshake_msg = {"type": "handshake", "stage_id": single_stage_id}
+        handshake_socket.send_pyobj(handshake_msg)
+
+        # Wait for response with timeout
+        if handshake_socket.poll(timeout=10000):  # 10 second timeout
+            response = handshake_socket.recv_pyobj()
+            if not response.get("ok", False):
+                error_msg = response.get("error", "unknown error")
+                raise RuntimeError(f"Handshake failed for stage-{single_stage_id}: {error_msg}")
+
+            in_q_spec = response.get("in_spec")
+            out_q_spec = response.get("out_spec")
+
+            if in_q_spec is None or out_q_spec is None:
+                raise RuntimeError(f"Handshake response missing specs for stage-{single_stage_id}")
+
+            logger.info(
+                f"[Headless] Stage-{single_stage_id} received endpoints via handshake: "
+                f"in={in_q_spec.endpoint}, out={out_q_spec.endpoint}"
+            )
+        else:
+            raise TimeoutError(f"Handshake timeout for stage-{single_stage_id} at {handshake_endpoint}")
+
+    finally:
+        handshake_socket.close(0)
     in_q = None
     out_q = None
 
