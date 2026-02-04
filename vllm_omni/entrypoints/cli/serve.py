@@ -10,14 +10,16 @@ import os
 import signal
 from typing import Any
 
+import msgspec.msgpack
 import uvloop
 import zmq
-from omegaconf import OmegaConf
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.network_utils import make_zmq_socket
+from vllm.v1.utils import get_engine_client_zmq_addr
 
 from vllm_omni.distributed.omni_connectors import (
     get_connectors_config_for_stage,
@@ -27,12 +29,13 @@ from vllm_omni.entrypoints.omni import OmniBase, omni_snapshot_download
 from vllm_omni.entrypoints.omni_stage import OmniStage
 from vllm_omni.entrypoints.openai.api_server import omni_run_server
 from vllm_omni.entrypoints.utils import (
-    load_stage_configs_from_model,
-    load_stage_configs_from_yaml,
-    resolve_model_config_path,
+    build_base_engine_args,
+    load_and_resolve_stage_configs,
 )
 
 logger = init_logger(__name__)
+
+HANDSHAKE_TIMEOUT_MINS = 5
 
 DESCRIPTION = """Launch a local OpenAI-compatible API server to serve Omni models
 via HTTP. Supports both multi-stage LLM models and diffusion models.
@@ -296,47 +299,21 @@ def _create_default_diffusion_stage_cfg(args: argparse.Namespace) -> list[dict[s
 def run_headless(args: argparse.Namespace) -> None:
     if args.api_server_count > 1:
         raise ValueError("api_server_count can't be set in headless mode")
-    if getattr(args, "worker_backend", "multi_process") != "multi_process":
+    if args.worker_backend != "multi_process":
         raise ValueError("headless mode requires worker_backend=multi_process")
 
-    model = getattr(args, "model", None)
-    if not model:
-        raise ValueError("model must be specified in headless mode")
-    model = omni_snapshot_download(model)
+    model = omni_snapshot_download(args.model)
 
-    tokenizer = getattr(args, "tokenizer", None)
-    base_engine_args = {"tokenizer": tokenizer} if tokenizer is not None else None
+    base_engine_args = build_base_engine_args(args)
+    stage_configs_path = args.stage_configs_path
+    config_path, stage_configs = load_and_resolve_stage_configs(
+        model,
+        stage_configs_path,
+        base_engine_args,
+        default_stage_cfg_factory=lambda: _create_default_diffusion_stage_cfg(args),
+    )
 
-    parallel_keys = [
-        "tensor_parallel_size",
-        "pipeline_parallel_size",
-        "data_parallel_size",
-        "data_parallel_size_local",
-        "data_parallel_backend",
-        "distributed_executor_backend",
-    ]
-    parallel_overrides = {
-        k: getattr(args, k) for k in parallel_keys if hasattr(args, k) and getattr(args, k) is not None
-    }
-    if parallel_overrides:
-        base_engine_args = base_engine_args or {}
-        base_engine_args.update(parallel_overrides)
-
-    stage_configs_path = getattr(args, "stage_configs_path", None)
-    if stage_configs_path is None:
-        config_path = resolve_model_config_path(model)
-        stage_configs = load_stage_configs_from_model(model, base_engine_args=base_engine_args)
-        if not stage_configs:
-            default_stage_cfg = _create_default_diffusion_stage_cfg(args)
-            stage_configs = OmegaConf.create(default_stage_cfg)
-    else:
-        config_path = stage_configs_path
-        stage_configs = load_stage_configs_from_yaml(stage_configs_path, base_engine_args=base_engine_args)
-
-    if not stage_configs:
-        raise ValueError("No stage configs found; provide --stage-configs-path or a supported model.")
-
-    single_stage_id = getattr(args, "stage_id", None)
+    single_stage_id = args.stage_id
     if single_stage_id is None:
         if len(stage_configs) != 1:
             raise ValueError("--stage-id is required in headless mode for multi-stage configs")
@@ -350,47 +327,42 @@ def run_headless(args: argparse.Namespace) -> None:
     if stage_config is None:
         raise ValueError(f"No stage matches stage_id={single_stage_id}.")
 
+    # TODO(wuhang): Support connectors config by cli
     transfer_config = load_omni_transfer_config(config_path, default_shm_threshold=args.shm_threshold_bytes)
     connectors_config = get_connectors_config_for_stage(transfer_config, single_stage_id)
 
-    omni_master_address = getattr(args, "omni_master_address", None) or "127.0.0.1"
-    omni_master_port = int(getattr(args, "omni_master_port", 5555) or 5555)
+    omni_master_address = args.omni_master_address
+    omni_master_port = args.omni_master_port
 
     # Perform handshake with orchestrator to get dynamically allocated endpoints
-    zmq_ctx = zmq.Context()
-    handshake_socket = zmq_ctx.socket(zmq.REQ)
-    handshake_socket.linger = 0
-    handshake_endpoint = f"tcp://{omni_master_address}:{omni_master_port}"
+    with zmq.Context() as zmq_ctx:
+        handshake_endpoint = get_engine_client_zmq_addr(
+            local_only=False, host=omni_master_address, port=omni_master_port
+        )
 
-    try:
-        handshake_socket.connect(handshake_endpoint)
-        handshake_msg = {"type": "handshake", "stage_id": single_stage_id}
-        handshake_socket.send_pyobj(handshake_msg)
+        with make_zmq_socket(zmq_ctx, handshake_endpoint, zmq.REQ, bind=False, linger=5000) as handshake_socket:
+            # TODO(wuhang): Define protocol in python dataclass.
+            handshake_msg = {"type": "handshake", "stage_id": single_stage_id}
+            handshake_socket.send(msgspec.msgpack.encode(handshake_msg))
 
-        # Wait for response with timeout
-        if handshake_socket.poll(timeout=10000):  # 10 second timeout
-            response = handshake_socket.recv_pyobj()
-            if not response.get("ok", False):
-                error_msg = response.get("error", "unknown error")
+            # Wait for response with timeout
+            if not handshake_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * 60_000):
+                raise RuntimeError(
+                    f"Handshake timeout ({HANDSHAKE_TIMEOUT_MINS} minutes) for stage-{single_stage_id} "
+                    f"at {handshake_endpoint}"
+                )
+
+            response = msgspec.msgpack.decode(handshake_socket.recv())
+            if not response["ok"]:
+                error_msg = response["error"]
                 raise RuntimeError(f"Handshake failed for stage-{single_stage_id}: {error_msg}")
 
-            in_q_spec = response.get("in_spec")
-            out_q_spec = response.get("out_spec")
-
-            if in_q_spec is None or out_q_spec is None:
-                raise RuntimeError(f"Handshake response missing specs for stage-{single_stage_id}")
+            in_endpoint, out_endpoint = response["in_endpoint"], response["out_endpoint"]
 
             logger.info(
                 f"[Headless] Stage-{single_stage_id} received endpoints via handshake: "
-                f"in={in_q_spec.endpoint}, out={out_q_spec.endpoint}"
+                f"in={in_endpoint}, out={out_endpoint}"
             )
-        else:
-            raise TimeoutError(f"Handshake timeout for stage-{single_stage_id} at {handshake_endpoint}")
-
-    finally:
-        handshake_socket.close(0)
-    in_q = None
-    out_q = None
 
     shutdown_requested = False
 
@@ -404,9 +376,8 @@ def run_headless(args: argparse.Namespace) -> None:
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    stage = OmniStage(stage_config, stage_init_timeout=int(getattr(args, "stage_init_timeout", 300)))
-    stage.set_zmq_master(omni_master_address, omni_master_port)
-    stage.attach_queues(in_q, out_q, in_q_spec=in_q_spec, out_q_spec=out_q_spec)
+    stage = OmniStage(stage_config, stage_init_timeout=args.stage_init_timeout)
+    stage.attach_queues(in_endpoint, out_endpoint)
 
     old_env = os.environ.get("VLLM_LOGGING_PREFIX")
     os.environ["VLLM_LOGGING_PREFIX"] = f"[Stage-{single_stage_id}] {'' if old_env is None else old_env}"
@@ -414,8 +385,8 @@ def run_headless(args: argparse.Namespace) -> None:
         stage.init_stage_worker(
             model,
             is_async=True,
-            shm_threshold_bytes=int(getattr(args, "shm_threshold_bytes", 65536)),
-            batch_timeout=int(getattr(args, "batch_timeout", 10)),
+            shm_threshold_bytes=int(args.shm_threshold_bytes),
+            batch_timeout=int(args.batch_timeout),
             connectors_config=connectors_config,
             worker_backend="multi_process",
             ignore_runtime_config=True,
@@ -424,14 +395,6 @@ def run_headless(args: argparse.Namespace) -> None:
             stage._proc.join()
     finally:
         stage.stop_stage_worker()
-        try:
-            zmq_ctx.term()
-        except Exception:
-            pass
-        if old_env is None:
-            os.environ.pop("VLLM_LOGGING_PREFIX", None)
-        else:
-            os.environ["VLLM_LOGGING_PREFIX"] = old_env
 
 
 def cmd_init() -> list[CLISubcommand]:

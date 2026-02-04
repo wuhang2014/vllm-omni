@@ -51,7 +51,6 @@ from vllm_omni.entrypoints.stage_utils import (
 )
 from vllm_omni.entrypoints.zmq_utils import (
     ZmqQueue,
-    ZmqQueueSpec,
     create_zmq_queue,
 )
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniPromptType, OmniSamplingParams, OmniTokensPrompt
@@ -142,16 +141,11 @@ class OmniStage:
         except TypeError as error:
             raise TypeError(f"Invalid default_sampling_params for stage {self.stage_id}: {error}") from error
         # Runtime orchestration state (added)
-        self._in_q: ZmqQueue | mp.queues.Queue | None = None
-        self._out_q: ZmqQueue | mp.queues.Queue | None = None
-        self._in_q_spec: ZmqQueueSpec | None = None
-        self._out_q_spec: ZmqQueueSpec | None = None
+        self._in_q: mp.queues.Queue | ZmqQueue | str | None = None
+        self._out_q: mp.queues.Queue | ZmqQueue | str | None = None
         self._proc: mp.Process | None = None
         self._shm_threshold_bytes: int = 65536
         self._stage_init_timeout: int = stage_init_timeout
-        self._zmq_master_address: str | None = None
-        self._zmq_master_port: int | None = None
-        self._zmq_use_handshake: bool = False
 
     def set_engine(self, engine: LLMEngine) -> None:
         """Set the LLM engine for this stage.
@@ -212,28 +206,17 @@ class OmniStage:
     # ----------------- New Orchestration APIs -----------------
     def attach_queues(
         self,
-        in_q: ZmqQueue | mp.queues.Queue | None,
-        out_q: ZmqQueue | mp.queues.Queue | None,
-        *,
-        in_q_spec: ZmqQueueSpec | None = None,
-        out_q_spec: ZmqQueueSpec | None = None,
+        in_q: mp.queues.Queue | ZmqQueue | str | None,
+        out_q: mp.queues.Queue | ZmqQueue | str | None,
     ) -> None:
         """Attach input and output queues for IPC communication.
 
         Args:
-            in_q: Input queue for receiving tasks from orchestrator
-            out_q: Output queue for sending results to orchestrator
+            in_q: Input queue for receiving tasks from orchestrator (queue object or endpoint string)
+            out_q: Output queue for sending results to orchestrator (queue object or endpoint string)
         """
         self._in_q = in_q
         self._out_q = out_q
-        self._in_q_spec = in_q_spec
-        self._out_q_spec = out_q_spec
-
-    def set_zmq_master(self, address: str, port: int, *, use_handshake: bool = True) -> None:
-        """Configure ZMQ master handshake endpoint for this stage."""
-        self._zmq_master_address = address
-        self._zmq_master_port = int(port)
-        self._zmq_use_handshake = bool(use_handshake)
 
     def stop_profile(self) -> dict:
         """Stop profiling by sending a signal to worker and waiting for response."""
@@ -297,7 +280,7 @@ class OmniStage:
         Raises:
             AssertionError: If queues are not attached before calling this method
         """
-        # assert self._in_q is not None and self._out_q is not None, "Queues must be attached before start_process"
+        assert self._in_q is not None and self._out_q is not None, "Queues must be attached before start_process"
 
         if worker_backend == "ray":
             ray_placement_group = kwargs.get("ray_placement_group", None)
@@ -362,8 +345,8 @@ class OmniStage:
                         args=(
                             model,
                             stage_payload,
-                            self._in_q_spec or self._in_q,
-                            self._out_q_spec or self._out_q,
+                            self._in_q,
+                            self._out_q,
                             batch_timeout,
                             self._stage_init_timeout,
                         ),
@@ -374,8 +357,8 @@ class OmniStage:
                         args=(
                             model,
                             stage_payload,
-                            self._in_q_spec or self._in_q,
-                            self._out_q_spec or self._out_q,
+                            self._in_q,
+                            self._out_q,
                             batch_timeout,
                             self._stage_init_timeout,
                         ),
@@ -399,19 +382,13 @@ class OmniStage:
                 self._in_q.put_nowait(SHUTDOWN_TASK)
             except Exception as e:
                 logger.warning("Failed to send shutdown to in_q: %s", e)
-            try:
-                close_fn = getattr(self._in_q, "close", None)
-                if callable(close_fn):
-                    close_fn()
-            except Exception:
-                pass
+            close_fn = getattr(self._in_q, "close", None)
+            if callable(close_fn):
+                close_fn()
         if self._out_q is not None:
-            try:
-                close_fn = getattr(self._out_q, "close", None)
-                if callable(close_fn):
-                    close_fn()
-            except Exception:
-                pass
+            close_fn = getattr(self._out_q, "close", None)
+            if callable(close_fn):
+                close_fn()
 
         if hasattr(self, "_ray_actor") and self._ray_actor:
             kill_ray_actor(self._ray_actor)
@@ -534,8 +511,8 @@ class OmniStage:
 def _stage_worker(
     model: str,
     stage_payload: dict[str, Any],
-    in_q: Any,
-    out_q: Any,
+    in_q: mp.queues.Queue | ZmqQueue | str,
+    out_q: mp.queues.Queue | ZmqQueue | str,
     batch_timeout: int = 10,
     stage_init_timeout: int = 300,
 ) -> None:
@@ -545,6 +522,8 @@ def _stage_worker(
     import multiprocessing as _mp
     import os as _os
     import time as _time
+
+    import zmq
 
     from vllm_omni.plugins import load_omni_general_plugins
 
@@ -572,36 +551,14 @@ def _stage_worker(
     if stage_type != "diffusion":
         _resolve_worker_cls(engine_args)
 
-    # Resolve ZMQ queue specs if needed
+    # Resolve ZMQ queue endpoints if needed
     zmq_ctx = None
-    if isinstance(in_q, ZmqQueueSpec) or isinstance(out_q, ZmqQueueSpec):
-        import zmq as _zmq
-
-        zmq_ctx = _zmq.Context()
-        if isinstance(in_q, ZmqQueueSpec):
-            in_q = create_zmq_queue(zmq_ctx, in_q)
-        if isinstance(out_q, ZmqQueueSpec):
-            out_q = create_zmq_queue(zmq_ctx, out_q)
-
-    def _cleanup_zmq() -> None:
-        if zmq_ctx is None:
-            return
-        try:
-            close_fn = getattr(in_q, "close", None)
-            if callable(close_fn):
-                close_fn()
-        except Exception:
-            pass
-        try:
-            close_fn = getattr(out_q, "close", None)
-            if callable(close_fn):
-                close_fn()
-        except Exception:
-            pass
-        try:
-            zmq_ctx.term()
-        except Exception:
-            pass
+    if isinstance(in_q, str) or isinstance(out_q, str):
+        zmq_ctx = zmq.Context()
+        if isinstance(in_q, str):
+            in_q = create_zmq_queue(zmq_ctx, in_q, zmq.PULL)
+        if isinstance(out_q, str):
+            out_q = create_zmq_queue(zmq_ctx, out_q, zmq.PUSH)
 
     # Aggregates for running average
     _agg_total_tokens = 0
@@ -806,7 +763,6 @@ def _stage_worker(
             connectors_config=connectors_config,
         )
         if connectors is None:
-            _cleanup_zmq()
             return
 
     # Signal readiness to orchestrator
@@ -1086,14 +1042,13 @@ def _stage_worker(
                         "error_tb": _tb,
                     }
                 )
-    _cleanup_zmq()
 
 
 def _stage_worker_async_entry(
     model: str,
     stage_payload: dict[str, Any],
-    in_q: Any,
-    out_q: Any,
+    in_q: mp.queues.Queue | ZmqQueue | str,
+    out_q: mp.queues.Queue | ZmqQueue | str,
     batch_timeout: int = 10,
     stage_init_timeout: int = 300,
 ) -> None:
@@ -1103,8 +1058,8 @@ def _stage_worker_async_entry(
 async def _stage_worker_async(
     model: str,
     stage_payload: dict[str, Any],
-    in_q: Any,
-    out_q: Any,
+    in_q: mp.queues.Queue | ZmqQueue | str,
+    out_q: mp.queues.Queue | ZmqQueue | str,
     batch_timeout: int = 10,
     stage_init_timeout: int = 300,
 ) -> None:
@@ -1113,6 +1068,8 @@ async def _stage_worker_async(
     import multiprocessing as _mp
     import os as _os
     import time as _time
+
+    import zmq
 
     from vllm_omni.plugins import load_omni_general_plugins
 
@@ -1139,36 +1096,14 @@ async def _stage_worker_async(
     if stage_type != "diffusion":
         _resolve_worker_cls(engine_args)
 
-    # Resolve ZMQ queue specs if needed
+    # Resolve ZMQ queue endpoints if needed
     zmq_ctx = None
-    if isinstance(in_q, ZmqQueueSpec) or isinstance(out_q, ZmqQueueSpec):
-        import zmq as _zmq
-
-        zmq_ctx = _zmq.Context()
-        if isinstance(in_q, ZmqQueueSpec):
-            in_q = create_zmq_queue(zmq_ctx, in_q)
-        if isinstance(out_q, ZmqQueueSpec):
-            out_q = create_zmq_queue(zmq_ctx, out_q)
-
-    def _cleanup_zmq() -> None:
-        if zmq_ctx is None:
-            return
-        try:
-            close_fn = getattr(in_q, "close", None)
-            if callable(close_fn):
-                close_fn()
-        except Exception:
-            pass
-        try:
-            close_fn = getattr(out_q, "close", None)
-            if callable(close_fn):
-                close_fn()
-        except Exception:
-            pass
-        try:
-            zmq_ctx.term()
-        except Exception:
-            pass
+    if isinstance(in_q, str) or isinstance(out_q, str):
+        zmq_ctx = zmq.Context()
+        if isinstance(in_q, str):
+            in_q = create_zmq_queue(zmq_ctx, in_q, zmq.PULL)
+        if isinstance(out_q, str):
+            out_q = create_zmq_queue(zmq_ctx, out_q, zmq.PUSH)
 
     # Aggregates for running average
     _agg_total_tokens = 0
@@ -1195,7 +1130,6 @@ async def _stage_worker_async(
             connectors_config=connectors_config,
         )
         if built_connectors is None:
-            _cleanup_zmq()
             return
         connectors = built_connectors
 
@@ -1532,7 +1466,6 @@ async def _stage_worker_async(
         try:
             task = in_q.get_nowait()
             task_type = task.get("type", OmniStageTaskType.GENERATE)
-            logger.info(f"Received task type: {task_type}")
             if task_type == OmniStageTaskType.SHUTDOWN:
                 logger.debug("Received shutdown signal")
                 stage_engine.shutdown()
@@ -1627,7 +1560,6 @@ async def _stage_worker_async(
             logger.debug("Enqueued result for request %s to downstream", rid)
     if log_stats_task is not None:
         log_stats_task.cancel()
-    _cleanup_zmq()
     logger.info("Stage worker exiting")
 
 

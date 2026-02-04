@@ -50,19 +50,13 @@ def _weak_close_cleanup_async(stage_list, stage_in_queues, stage_out_queues, ray
                 q.put_nowait(SHUTDOWN_TASK)
             except Exception as e:
                 logger.warning(f"Failed to send shutdown signal to stage input queue: {e}")
-            try:
-                close_fn = getattr(q, "close", None)
-                if callable(close_fn):
-                    close_fn()
-            except Exception:
-                pass
+            close_fn = getattr(q, "close", None)
+            if callable(close_fn):
+                close_fn()
         for q in stage_out_queues:
-            try:
-                close_fn = getattr(q, "close", None)
-                if callable(close_fn):
-                    close_fn()
-            except Exception:
-                pass
+            close_fn = getattr(q, "close", None)
+            if callable(close_fn):
+                close_fn()
         for stage in stage_list:
             try:
                 stage.stop_stage_worker()
@@ -73,10 +67,7 @@ def _weak_close_cleanup_async(stage_list, stage_in_queues, stage_out_queues, ray
     if output_handler is not None:
         output_handler.cancel()
     if zmq_ctx is not None:
-        try:
-            zmq_ctx.term()
-        except Exception:
-            pass
+        zmq_ctx.term()
 
 
 class AsyncOmni(OmniBase):
@@ -292,8 +283,7 @@ class AsyncOmni(OmniBase):
         async with self._pause_cond:
             await self._pause_cond.wait_for(lambda: not self._paused)
 
-        logger.info(f"[{self._name}] generate() called")
-        logger.info(f"====== {self.stage_list=}")
+        logger.debug(f"[{self._name}] generate() called")
         try:
             # Start output handler on the first call to generate()
             self._run_output_handler()
