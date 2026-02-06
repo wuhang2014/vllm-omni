@@ -47,6 +47,8 @@ class ZmqQueue:
         if send_timeout_ms is not None:
             self._socket.sndtimeo = send_timeout_ms
 
+        self.endpoint = path
+
     def put(self, obj: Any) -> None:
         """Send an object to the queue. Blocks until sent or timeout."""
         try:

@@ -348,15 +348,14 @@ class OmniBase:
             if self.worker_backend == "ray":
                 in_q = self._queue_cls()
                 out_q = self._queue_cls()
-                stage.attach_queues(in_q, out_q)
             else:
                 in_endpoint, out_endpoint = self._handshake_endpoints[stage_id]
                 in_q = ZmqQueue(self._zmq_ctx, zmq.PUSH, bind=in_endpoint)
                 out_q = ZmqQueue(self._zmq_ctx, zmq.PULL, bind=out_endpoint)
-                stage.attach_queues(in_endpoint, out_endpoint)
 
             self._stage_in_queues.append(in_q)
             self._stage_out_queues.append(out_q)
+            stage.attach_queues(in_q, out_q)
 
             stage_connectors_config = get_stage_connector_config(
                 self.omni_transfer_config,

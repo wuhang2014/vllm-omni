@@ -345,8 +345,8 @@ class OmniStage:
                         args=(
                             model,
                             stage_payload,
-                            self._in_q,
-                            self._out_q,
+                            self._in_q.endpoint if isinstance(self._in_q, ZmqQueue) else self._in_q,
+                            self._out_q.endpoint if isinstance(self._out_q, ZmqQueue) else self._out_q,
                             batch_timeout,
                             self._stage_init_timeout,
                         ),
@@ -357,8 +357,8 @@ class OmniStage:
                         args=(
                             model,
                             stage_payload,
-                            self._in_q,
-                            self._out_q,
+                            self._in_q.endpoint if isinstance(self._in_q, ZmqQueue) else self._in_q,
+                            self._out_q.endpoint if isinstance(self._out_q, ZmqQueue) else self._out_q,
                             batch_timeout,
                             self._stage_init_timeout,
                         ),
