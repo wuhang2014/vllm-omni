@@ -59,7 +59,7 @@ def _weak_close_cleanup(
     ray_pg,
     zmq_ctx=None,
     handshake_stop: threading.Event | None = None,
-    handshake_socket: zmq.Socket | None = None,
+    zmq_handshake_socket: zmq.Socket | None = None,
     handshake_thread: threading.Thread | None = None,
 ):
     """Weak reference cleanup function for OmniBase instances."""
@@ -84,8 +84,8 @@ def _weak_close_cleanup(
     try_close_ray(ray_pg)
     if handshake_stop is not None:
         handshake_stop.set()
-    if handshake_socket is not None:
-        handshake_socket.close(0)
+    if zmq_handshake_socket is not None:
+        zmq_handshake_socket.close(0)
     if handshake_thread is not None:
         handshake_thread.join(timeout=1.0)
     if zmq_ctx is not None:
@@ -348,14 +348,15 @@ class OmniBase:
             if self.worker_backend == "ray":
                 in_q = self._queue_cls()
                 out_q = self._queue_cls()
+                stage.attach_queues(in_q, out_q)
             else:
                 in_endpoint, out_endpoint = self._handshake_endpoints[stage_id]
                 in_q = ZmqQueue(self._zmq_ctx, zmq.PUSH, bind=in_endpoint)
                 out_q = ZmqQueue(self._zmq_ctx, zmq.PULL, bind=out_endpoint)
+                stage.attach_queues(in_endpoint, out_endpoint)
 
             self._stage_in_queues.append(in_q)
             self._stage_out_queues.append(out_q)
-            stage.attach_queues(in_q, out_q)
 
             stage_connectors_config = get_stage_connector_config(
                 self.omni_transfer_config,
@@ -629,7 +630,7 @@ class OmniBase:
         )
 
         self._handshake_stop = threading.Event()
-        self._handshake_socket = make_zmq_socket(self._zmq_ctx, endpoint, zmq.REP, bind=True, linger=5000)
+        self._zmq_handshake_socket = make_zmq_socket(self._zmq_ctx, endpoint, zmq.REP, bind=True, linger=5000)
 
         # Start server thread
         self._handshake_thread = threading.Thread(
