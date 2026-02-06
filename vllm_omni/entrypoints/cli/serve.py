@@ -297,7 +297,7 @@ def _create_default_diffusion_stage_cfg(args: argparse.Namespace) -> list[dict[s
 
 
 def run_headless(args: argparse.Namespace) -> None:
-    if args.api_server_count > 1:
+    if args.api_server_count is not None and args.api_server_count > 1:
         raise ValueError("api_server_count can't be set in headless mode")
     if args.worker_backend != "multi_process":
         raise ValueError("headless mode requires worker_backend=multi_process")
