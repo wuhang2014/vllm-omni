@@ -68,7 +68,7 @@ class OmniServeCommand(CLISubcommand):
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
-        if args.headless or args.api_server_count < 1:
+        if args.headless:
             run_headless(args)
         else:
             uvloop.run(omni_run_server(args))
