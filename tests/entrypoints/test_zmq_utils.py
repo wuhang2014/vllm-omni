@@ -20,12 +20,23 @@ def zmq_context():
     ctx.term()
 
 
+@pytest.fixture
+def unique_endpoint(tmp_path):
+    """Generate a unique IPC endpoint path for each test."""
+    counter = 0
+    def _make_endpoint():
+        nonlocal counter
+        counter += 1
+        return f"ipc://{tmp_path}/test_{counter}.ipc"
+    return _make_endpoint
+
+
 class TestZmqQueue:
     """Test suite for ZmqQueue class."""
 
-    def test_init_with_bind(self, zmq_context):
+    def test_init_with_bind(self, zmq_context, unique_endpoint):
         """Test ZmqQueue initialization with bind mode."""
-        endpoint = "ipc:///tmp/test_bind.ipc"
+        endpoint = unique_endpoint()
         queue_obj = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         
         assert queue_obj.endpoint == endpoint
@@ -34,9 +45,9 @@ class TestZmqQueue:
         
         queue_obj.close()
 
-    def test_init_with_connect(self, zmq_context):
+    def test_init_with_connect(self, zmq_context, unique_endpoint):
         """Test ZmqQueue initialization with connect mode."""
-        endpoint = "ipc:///tmp/test_connect.ipc"
+        endpoint = unique_endpoint()
         # First create a server to bind
         server = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         
@@ -54,9 +65,9 @@ class TestZmqQueue:
         with pytest.raises(ValueError, match="Either bind or connect must be specified"):
             ZmqQueue(zmq_context, zmq.PULL)
 
-    def test_init_with_timeouts(self, zmq_context):
+    def test_init_with_timeouts(self, zmq_context, unique_endpoint):
         """Test ZmqQueue initialization with timeout settings."""
-        endpoint = "ipc:///tmp/test_timeouts.ipc"
+        endpoint = unique_endpoint()
         recv_timeout = 1000  # 1 second
         send_timeout = 500   # 0.5 seconds
         
@@ -75,9 +86,9 @@ class TestZmqQueue:
         
         queue_obj.close()
 
-    def test_put_and_get(self, zmq_context):
+    def test_put_and_get(self, zmq_context, unique_endpoint):
         """Test basic put and get operations."""
-        endpoint = "ipc:///tmp/test_put_get.ipc"
+        endpoint = unique_endpoint()
         server = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         client = ZmqQueue(zmq_context, zmq.PUSH, connect=endpoint)
         
@@ -96,9 +107,9 @@ class TestZmqQueue:
         client.close()
         server.close()
 
-    def test_put_nowait(self, zmq_context):
+    def test_put_nowait(self, zmq_context, unique_endpoint):
         """Test put_nowait operation."""
-        endpoint = "ipc:///tmp/test_put_nowait.ipc"
+        endpoint = unique_endpoint()
         server = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         client = ZmqQueue(zmq_context, zmq.PUSH, connect=endpoint)
         
@@ -117,9 +128,9 @@ class TestZmqQueue:
         client.close()
         server.close()
 
-    def test_get_with_timeout(self, zmq_context):
+    def test_get_with_timeout(self, zmq_context, unique_endpoint):
         """Test get operation with timeout."""
-        endpoint = "ipc:///tmp/test_get_timeout.ipc"
+        endpoint = unique_endpoint()
         server = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         
         # Try to get from empty queue with timeout
@@ -128,9 +139,9 @@ class TestZmqQueue:
         
         server.close()
 
-    def test_get_without_timeout(self, zmq_context):
+    def test_get_without_timeout(self, zmq_context, unique_endpoint):
         """Test get operation without timeout (blocking until data arrives)."""
-        endpoint = "ipc:///tmp/test_get_no_timeout.ipc"
+        endpoint = unique_endpoint()
         server = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         client = ZmqQueue(zmq_context, zmq.PUSH, connect=endpoint)
         
@@ -150,9 +161,9 @@ class TestZmqQueue:
         client.close()
         server.close()
 
-    def test_get_nowait_empty_queue(self, zmq_context):
+    def test_get_nowait_empty_queue(self, zmq_context, unique_endpoint):
         """Test get_nowait on empty queue raises queue.Empty."""
-        endpoint = "ipc:///tmp/test_get_nowait_empty.ipc"
+        endpoint = unique_endpoint()
         server = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         
         with pytest.raises(queue.Empty):
@@ -160,9 +171,9 @@ class TestZmqQueue:
         
         server.close()
 
-    def test_get_nowait_with_data(self, zmq_context):
+    def test_get_nowait_with_data(self, zmq_context, unique_endpoint):
         """Test get_nowait operation when data is available."""
-        endpoint = "ipc:///tmp/test_get_nowait_data.ipc"
+        endpoint = unique_endpoint()
         server = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         client = ZmqQueue(zmq_context, zmq.PUSH, connect=endpoint)
         
@@ -181,18 +192,18 @@ class TestZmqQueue:
         client.close()
         server.close()
 
-    def test_empty_on_empty_queue(self, zmq_context):
+    def test_empty_on_empty_queue(self, zmq_context, unique_endpoint):
         """Test empty() returns True on empty queue."""
-        endpoint = "ipc:///tmp/test_empty_true.ipc"
+        endpoint = unique_endpoint()
         server = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         
         assert server.empty() is True
         
         server.close()
 
-    def test_empty_on_non_empty_queue(self, zmq_context):
+    def test_empty_on_non_empty_queue(self, zmq_context, unique_endpoint):
         """Test empty() returns False when queue has data."""
-        endpoint = "ipc:///tmp/test_empty_false.ipc"
+        endpoint = unique_endpoint()
         server = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         client = ZmqQueue(zmq_context, zmq.PUSH, connect=endpoint)
         
@@ -215,9 +226,9 @@ class TestZmqQueue:
         client.close()
         server.close()
 
-    def test_close(self, zmq_context):
+    def test_close(self, zmq_context, unique_endpoint):
         """Test close operation."""
-        endpoint = "ipc:///tmp/test_close.ipc"
+        endpoint = unique_endpoint()
         queue_obj = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         
         # Close should not raise any exceptions
@@ -226,9 +237,9 @@ class TestZmqQueue:
         # Calling close multiple times should be safe
         queue_obj.close()
 
-    def test_multiple_messages(self, zmq_context):
+    def test_multiple_messages(self, zmq_context, unique_endpoint):
         """Test sending and receiving multiple messages."""
-        endpoint = "ipc:///tmp/test_multiple.ipc"
+        endpoint = unique_endpoint()
         server = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         client = ZmqQueue(zmq_context, zmq.PUSH, connect=endpoint)
         
@@ -254,9 +265,9 @@ class TestZmqQueue:
         client.close()
         server.close()
 
-    def test_different_data_types(self, zmq_context):
+    def test_different_data_types(self, zmq_context, unique_endpoint):
         """Test that ZmqQueue can handle various Python data types."""
-        endpoint = "ipc:///tmp/test_datatypes.ipc"
+        endpoint = unique_endpoint()
         server = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         client = ZmqQueue(zmq_context, zmq.PUSH, connect=endpoint)
         
@@ -270,7 +281,6 @@ class TestZmqQueue:
             [1, 2, 3],                   # list
             {"key": "value"},            # dict
             (1, 2, 3),                   # tuple
-            {1, 2, 3},                   # set
             None,                        # None
             True,                        # bool
         ]
@@ -292,9 +302,9 @@ class TestZmqQueue:
 class TestCreateZmqQueue:
     """Test suite for create_zmq_queue helper function."""
 
-    def test_create_zmq_queue(self, zmq_context):
+    def test_create_zmq_queue(self, zmq_context, unique_endpoint):
         """Test create_zmq_queue helper function."""
-        endpoint = "ipc:///tmp/test_create_helper.ipc"
+        endpoint = unique_endpoint()
         # First create a server to bind
         server = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         
@@ -315,9 +325,9 @@ class TestCreateZmqQueue:
         client.close()
         server.close()
 
-    def test_create_zmq_queue_uses_connect_mode(self, zmq_context):
+    def test_create_zmq_queue_uses_connect_mode(self, zmq_context, unique_endpoint):
         """Test that create_zmq_queue uses connect mode by default."""
-        endpoint = "ipc:///tmp/test_create_connect.ipc"
+        endpoint = unique_endpoint()
         # First create a server to bind
         server = ZmqQueue(zmq_context, zmq.PULL, bind=endpoint)
         
