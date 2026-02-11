@@ -455,7 +455,7 @@ def test_initialize_stage_configs_called_when_none(monkeypatch, fake_stage_confi
         base_engine_args: dict | None = None,
         default_stage_cfg_factory=None,
     ):
-        return "fake_config_path", [
+        return None, [
             _FakeStageConfig(fake_stage_config),
             _FakeStageConfig(fake_stage_config),
         ]
@@ -525,7 +525,7 @@ def test_generate_raises_on_length_mismatch(monkeypatch, fake_stage_config):
         base_engine_args: dict | None = None,
         default_stage_cfg_factory=None,
     ):
-        return "fake_config_path", [_FakeStageConfig(fake_stage_config)]
+        return None, [_FakeStageConfig(fake_stage_config)]
 
     import sys
 
@@ -577,7 +577,7 @@ def test_generate_pipeline_and_final_outputs(monkeypatch, fake_stage_config):
         base_engine_args: dict | None = None,
         default_stage_cfg_factory=None,
     ):
-        return "fake_config_path", [_FakeStageConfig(stage_cfg0), _FakeStageConfig(stage_cfg1)]
+        return None, [_FakeStageConfig(stage_cfg0), _FakeStageConfig(stage_cfg1)]
 
     import sys
 
@@ -676,7 +676,7 @@ def test_generate_pipeline_with_batch_input(monkeypatch, fake_stage_config):
         base_engine_args: dict | None = None,
         default_stage_cfg_factory=None,
     ):
-        return "fake_config_path", [_FakeStageConfig(stage_cfg0), _FakeStageConfig(stage_cfg1)]
+        return None, [_FakeStageConfig(stage_cfg0), _FakeStageConfig(stage_cfg1)]
 
     import sys
 
@@ -788,7 +788,7 @@ def test_generate_no_final_output_returns_empty(monkeypatch, fake_stage_config):
         base_engine_args: dict | None = None,
         default_stage_cfg_factory=None,
     ):
-        return "fake_config_path", [_FakeStageConfig(stage_cfg0), _FakeStageConfig(stage_cfg1)]
+        return None, [_FakeStageConfig(stage_cfg0), _FakeStageConfig(stage_cfg1)]
 
     import sys
 
@@ -872,7 +872,7 @@ def test_generate_sampling_params_none_use_default(monkeypatch, fake_stage_confi
         base_engine_args: dict | None = None,
         default_stage_cfg_factory=None,
     ):
-        return "fake_config_path", [_FakeStageConfig(stage_cfg0), _FakeStageConfig(stage_cfg1)]
+        return None, [_FakeStageConfig(stage_cfg0), _FakeStageConfig(stage_cfg1)]
 
     import sys
 
@@ -945,7 +945,7 @@ def test_wait_for_stages_ready_timeout(monkeypatch, fake_stage_config):
         base_engine_args: dict | None = None,
         default_stage_cfg_factory=None,
     ):
-        return "fake_config_path", [_FakeStageConfig(fake_stage_config)]
+        return None, [_FakeStageConfig(fake_stage_config)]
 
     import sys
 
@@ -1006,7 +1006,7 @@ def test_generate_handles_error_messages(monkeypatch, fake_stage_config):
         base_engine_args: dict | None = None,
         default_stage_cfg_factory=None,
     ):
-        return "fake_config_path", [_FakeStageConfig(fake_stage_config)]
+        return None, [_FakeStageConfig(fake_stage_config)]
 
     import sys
 
@@ -1086,7 +1086,7 @@ def test_close_sends_shutdown_signal(monkeypatch, fake_stage_config):
         base_engine_args: dict | None = None,
         default_stage_cfg_factory=None,
     ):
-        return "fake_config_path", [_FakeStageConfig(fake_stage_config)]
+        return None, [_FakeStageConfig(fake_stage_config)]
 
     import sys
 
