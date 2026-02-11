@@ -8,6 +8,8 @@ from vllm_omni.entrypoints.async_omni import AsyncOmni
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
+MODEL = "riverclouds/qwen_image_random"
+
 
 def test_default_stage_config_includes_cache_backend(monkeypatch):
     """Ensure cache_backend/cache_config are preserved in default diffusion stage."""
@@ -17,7 +19,7 @@ def test_default_stage_config_includes_cache_backend(monkeypatch):
     monkeypatch.setattr(AsyncOmni, "_wait_for_stages_ready", lambda self, timeout=0: None)
 
     omni = AsyncOmni(
-        model="dummy-model",
+        model=MODEL,
         cache_backend="cache_dit",
         cache_config='{"Fn_compute_blocks": 2}',
         vae_use_slicing=True,
@@ -47,7 +49,7 @@ def test_default_cache_config_used_when_missing(monkeypatch):
     monkeypatch.setattr(AsyncOmni, "_wait_for_stages_ready", lambda self, timeout=0: None)
 
     omni = AsyncOmni(
-        model="dummy-model",
+        model=MODEL,
         cache_backend="cache_dit",
     )
 
@@ -65,7 +67,7 @@ def test_default_stage_devices_from_sequence_parallel(monkeypatch):
     monkeypatch.setattr(AsyncOmni, "_wait_for_stages_ready", lambda self, timeout=0: None)
 
     omni = AsyncOmni(
-        model="dummy-model",
+        model=MODEL,
         ulysses_degree=2,
         ring_degree=2,
     )
