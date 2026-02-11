@@ -754,7 +754,6 @@ def test_generate_pipeline_and_final_outputs(monkeypatch, fake_stage_config):
     _setup_multiprocessing_mocks(monkeypatch)
     _setup_ipc_mocks(monkeypatch)
     _setup_log_mocks(monkeypatch)
-    _setup_connector_mocks(monkeypatch)
 
     monkeypatch.setattr(
         "vllm_omni.entrypoints.utils.load_and_resolve_stage_configs",
@@ -771,7 +770,8 @@ def test_generate_pipeline_and_final_outputs(monkeypatch, fake_stage_config):
 
     monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(cfg, **kwargs))
     monkeypatch.setattr(omni_module, "load_and_resolve_stage_configs", _fake_loader)
-    # Apply adapter mock after importing omni module
+    # Apply connector and adapter mocks after importing omni module
+    _setup_connector_mocks(monkeypatch, omni_module)
     _setup_connector_adapter_mock(monkeypatch, omni_module)
 
     # Mock uuid.uuid4() to return a predictable value for request ID generation
