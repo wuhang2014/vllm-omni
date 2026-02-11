@@ -416,8 +416,11 @@ def _setup_log_mocks(monkeypatch):
     )
 
 
-def _setup_connector_mocks(monkeypatch):
-    """Helper function to set up connector mocks for stage-to-stage forwarding."""
+def _setup_connector_mocks(monkeypatch, omni_module=None):
+    """Helper function to set up connector mocks for stage-to-stage forwarding.
+
+    If omni_module is provided, mocks directly on the module. Otherwise, uses string path.
+    """
 
     # Mock initialize_orchestrator_connectors to return fake connectors
     def _fake_initialize_orchestrator_connectors(config_path, worker_backend=None, shm_threshold_bytes=None):
@@ -429,11 +432,16 @@ def _setup_connector_mocks(monkeypatch):
             fake_connectors[(str(i), str(i + 1))] = MagicMock()
         return None, fake_connectors
 
-    monkeypatch.setattr(
-        "vllm_omni.entrypoints.omni.initialize_orchestrator_connectors",
-        _fake_initialize_orchestrator_connectors,
-        raising=False,
-    )
+    if omni_module is not None:
+        # Mock directly on the omni module where it's used (after import)
+        monkeypatch.setattr(omni_module, "initialize_orchestrator_connectors", _fake_initialize_orchestrator_connectors)
+    else:
+        # Mock via string path (before import)
+        monkeypatch.setattr(
+            "vllm_omni.entrypoints.omni.initialize_orchestrator_connectors",
+            _fake_initialize_orchestrator_connectors,
+            raising=False,
+        )
 
 
 def _setup_connector_adapter_mock(monkeypatch, omni_module):
@@ -850,7 +858,6 @@ def test_generate_pipeline_with_batch_input(monkeypatch, fake_stage_config):
     _setup_multiprocessing_mocks(monkeypatch)
     _setup_ipc_mocks(monkeypatch)
     _setup_log_mocks(monkeypatch)
-    _setup_connector_mocks(monkeypatch)
 
     monkeypatch.setattr(
         "vllm_omni.entrypoints.utils.load_and_resolve_stage_configs",
@@ -867,7 +874,8 @@ def test_generate_pipeline_with_batch_input(monkeypatch, fake_stage_config):
 
     monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(cfg, **kwargs))
     monkeypatch.setattr(omni_module, "load_and_resolve_stage_configs", _fake_loader)
-    # Apply adapter mock after importing omni module
+    # Apply connector and adapter mocks after importing omni module
+    _setup_connector_mocks(monkeypatch, omni_module)
     _setup_connector_adapter_mock(monkeypatch, omni_module)
 
     # Mock uuid.uuid4() to return a predictable value for request ID generation
@@ -968,7 +976,6 @@ def test_generate_no_final_output_returns_empty(monkeypatch, fake_stage_config):
     _setup_multiprocessing_mocks(monkeypatch)
     _setup_ipc_mocks(monkeypatch)
     _setup_log_mocks(monkeypatch)
-    _setup_connector_mocks(monkeypatch)
 
     monkeypatch.setattr(
         "vllm_omni.entrypoints.utils.load_and_resolve_stage_configs",
@@ -985,7 +992,8 @@ def test_generate_no_final_output_returns_empty(monkeypatch, fake_stage_config):
 
     monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(cfg, **kwargs))
     monkeypatch.setattr(omni_module, "load_and_resolve_stage_configs", _fake_loader)
-    # Apply adapter mock after importing omni module
+    # Apply connector and adapter mocks after importing omni module
+    _setup_connector_mocks(monkeypatch, omni_module)
     _setup_connector_adapter_mock(monkeypatch, omni_module)
 
     # Mock uuid.uuid4() to return a predictable value for request ID generation
@@ -1058,7 +1066,6 @@ def test_generate_sampling_params_none_use_default(monkeypatch, fake_stage_confi
     _setup_multiprocessing_mocks(monkeypatch)
     _setup_ipc_mocks(monkeypatch)
     _setup_log_mocks(monkeypatch)
-    _setup_connector_mocks(monkeypatch)
 
     monkeypatch.setattr(
         "vllm_omni.entrypoints.utils.load_and_resolve_stage_configs",
@@ -1075,7 +1082,8 @@ def test_generate_sampling_params_none_use_default(monkeypatch, fake_stage_confi
 
     monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(cfg, **kwargs))
     monkeypatch.setattr(omni_module, "load_and_resolve_stage_configs", _fake_loader)
-    # Apply adapter mock after importing omni module
+    # Apply connector and adapter mocks after importing omni module
+    _setup_connector_mocks(monkeypatch, omni_module)
     _setup_connector_adapter_mock(monkeypatch, omni_module)
 
     # Mock uuid.uuid4() to return a predictable value for request ID generation
