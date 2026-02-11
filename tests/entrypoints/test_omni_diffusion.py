@@ -745,6 +745,7 @@ def test_generate_pipeline_and_final_outputs(monkeypatch, fake_stage_config):
         "vllm_omni.entrypoints.omni",
         "vllm_omni.entrypoints.omni_stage",
         "vllm_omni.distributed.omni_connectors.adapter",
+        "vllm_omni.distributed.omni_connectors",
     ]:
         if module_name in sys.modules:
             del sys.modules[module_name]
@@ -850,6 +851,7 @@ def test_generate_pipeline_with_batch_input(monkeypatch, fake_stage_config):
         "vllm_omni.entrypoints.omni",
         "vllm_omni.entrypoints.omni_stage",
         "vllm_omni.distributed.omni_connectors.adapter",
+        "vllm_omni.distributed.omni_connectors",
     ]:
         if module_name in sys.modules:
             del sys.modules[module_name]
@@ -968,6 +970,7 @@ def test_generate_no_final_output_returns_empty(monkeypatch, fake_stage_config):
         "vllm_omni.entrypoints.omni",
         "vllm_omni.entrypoints.omni_stage",
         "vllm_omni.distributed.omni_connectors.adapter",
+        "vllm_omni.distributed.omni_connectors",
     ]:
         if module_name in sys.modules:
             del sys.modules[module_name]
@@ -1058,6 +1061,7 @@ def test_generate_sampling_params_none_use_default(monkeypatch, fake_stage_confi
         "vllm_omni.entrypoints.omni",
         "vllm_omni.entrypoints.omni_stage",
         "vllm_omni.distributed.omni_connectors.adapter",
+        "vllm_omni.distributed.omni_connectors",
     ]:
         if module_name in sys.modules:
             del sys.modules[module_name]
