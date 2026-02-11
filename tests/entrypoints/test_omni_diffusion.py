@@ -436,6 +436,7 @@ def _setup_connector_mocks(monkeypatch):
     )
 
     # Mock try_send_via_connector to always succeed
+    # Mock at the source (adapter module) so it works when imported by omni module
     def _fake_try_send_via_connector(
         connector,
         stage_id,
@@ -456,6 +457,13 @@ def _setup_connector_mocks(monkeypatch):
         next_stage_queue_submit_fn(task)
         return True
 
+    # Mock in the adapter module where it's defined
+    monkeypatch.setattr(
+        "vllm_omni.distributed.omni_connectors.adapter.try_send_via_connector",
+        _fake_try_send_via_connector,
+        raising=False,
+    )
+    # Also mock in the omni module where it's imported
     monkeypatch.setattr(
         "vllm_omni.entrypoints.omni.try_send_via_connector",
         _fake_try_send_via_connector,
@@ -732,6 +740,7 @@ def test_generate_pipeline_and_final_outputs(monkeypatch, fake_stage_config):
         "vllm_omni.entrypoints.utils",
         "vllm_omni.entrypoints.omni",
         "vllm_omni.entrypoints.omni_stage",
+        "vllm_omni.distributed.omni_connectors.adapter",
     ]:
         if module_name in sys.modules:
             del sys.modules[module_name]
@@ -755,25 +764,8 @@ def test_generate_pipeline_and_final_outputs(monkeypatch, fake_stage_config):
 
     import vllm_omni.entrypoints.omni as omni_module
 
-    # Re-apply connector mock to the imported module since it imports try_send_via_connector
-    def _fake_try_send_via_connector(
-        connector,
-        stage_id,
-        next_stage_id,
-        req_id,
-        next_inputs,
-        sampling_params,
-        original_prompt,
-        next_stage_queue_submit_fn,
-        metrics,
-    ):
-        task = {"request_id": req_id, "engine_inputs": next_inputs, "sampling_params": sampling_params}
-        next_stage_queue_submit_fn(task)
-        return True
-
     monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(cfg, **kwargs))
     monkeypatch.setattr(omni_module, "load_and_resolve_stage_configs", _fake_loader)
-    monkeypatch.setattr(omni_module, "try_send_via_connector", _fake_try_send_via_connector)
 
     # Mock uuid.uuid4() to return a predictable value for request ID generation
     test_uuid = uuid.UUID("00000000-0000-0000-0000-000000000000")
@@ -851,6 +843,7 @@ def test_generate_pipeline_with_batch_input(monkeypatch, fake_stage_config):
         "vllm_omni.entrypoints.utils",
         "vllm_omni.entrypoints.omni",
         "vllm_omni.entrypoints.omni_stage",
+        "vllm_omni.distributed.omni_connectors.adapter",
     ]:
         if module_name in sys.modules:
             del sys.modules[module_name]
@@ -874,25 +867,8 @@ def test_generate_pipeline_with_batch_input(monkeypatch, fake_stage_config):
 
     import vllm_omni.entrypoints.omni as omni_module
 
-    # Re-apply connector mock to the imported module since it imports try_send_via_connector
-    def _fake_try_send_via_connector(
-        connector,
-        stage_id,
-        next_stage_id,
-        req_id,
-        next_inputs,
-        sampling_params,
-        original_prompt,
-        next_stage_queue_submit_fn,
-        metrics,
-    ):
-        task = {"request_id": req_id, "engine_inputs": next_inputs, "sampling_params": sampling_params}
-        next_stage_queue_submit_fn(task)
-        return True
-
     monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(cfg, **kwargs))
     monkeypatch.setattr(omni_module, "load_and_resolve_stage_configs", _fake_loader)
-    monkeypatch.setattr(omni_module, "try_send_via_connector", _fake_try_send_via_connector)
 
     # Mock uuid.uuid4() to return a predictable value for request ID generation
     test_uuid = uuid.UUID("00000000-0000-0000-0000-000000000000")
@@ -983,6 +959,7 @@ def test_generate_no_final_output_returns_empty(monkeypatch, fake_stage_config):
         "vllm_omni.entrypoints.utils",
         "vllm_omni.entrypoints.omni",
         "vllm_omni.entrypoints.omni_stage",
+        "vllm_omni.distributed.omni_connectors.adapter",
     ]:
         if module_name in sys.modules:
             del sys.modules[module_name]
@@ -1070,6 +1047,7 @@ def test_generate_sampling_params_none_use_default(monkeypatch, fake_stage_confi
         "vllm_omni.entrypoints.utils",
         "vllm_omni.entrypoints.omni",
         "vllm_omni.entrypoints.omni_stage",
+        "vllm_omni.distributed.omni_connectors.adapter",
     ]:
         if module_name in sys.modules:
             del sys.modules[module_name]
@@ -1093,25 +1071,8 @@ def test_generate_sampling_params_none_use_default(monkeypatch, fake_stage_confi
 
     import vllm_omni.entrypoints.omni as omni_module
 
-    # Re-apply connector mock to the imported module since it imports try_send_via_connector
-    def _fake_try_send_via_connector(
-        connector,
-        stage_id,
-        next_stage_id,
-        req_id,
-        next_inputs,
-        sampling_params,
-        original_prompt,
-        next_stage_queue_submit_fn,
-        metrics,
-    ):
-        task = {"request_id": req_id, "engine_inputs": next_inputs, "sampling_params": sampling_params}
-        next_stage_queue_submit_fn(task)
-        return True
-
     monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(cfg, **kwargs))
     monkeypatch.setattr(omni_module, "load_and_resolve_stage_configs", _fake_loader)
-    monkeypatch.setattr(omni_module, "try_send_via_connector", _fake_try_send_via_connector)
 
     # Mock uuid.uuid4() to return a predictable value for request ID generation
     test_uuid = uuid.UUID("00000000-0000-0000-0000-000000000000")
