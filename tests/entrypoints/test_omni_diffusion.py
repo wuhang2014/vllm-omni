@@ -18,6 +18,8 @@ warnings.filterwarnings(
     category=DeprecationWarning,
 )
 
+MODEL = "riverclouds/qwen_image_random"
+
 
 class _FakeEngineArgs(dict):
     """Fake engine args that can be used both as object attributes and as **kwargs."""
@@ -168,7 +170,7 @@ class _FakeStage:
         self._proc = MagicMock()
         self._proc.start = MagicMock()
         self._proc.join = MagicMock()
-        self._proc.is_alive = MagicMock(return_value=True)  # Return True so Omni waits for stage_ready
+        self._proc.is_alive = MagicMock(return_value=False)
         self._proc.terminate = MagicMock()
         # Send stage_ready message to output queue
         if self._out_q is not None:
@@ -565,7 +567,7 @@ def test_initialize_stage_configs_called_when_none(monkeypatch, fake_stage_confi
 
     from vllm_omni.entrypoints.omni import Omni
 
-    omni = Omni(model="any", init_timeout=1)
+    omni = Omni(model=MODEL, init_timeout=1)
     # Verify: auto-loaded stage_configs and stage_list have consistent count
     assert isinstance(omni.stage_configs, list)
     assert len(omni.stage_configs) == 2
@@ -625,7 +627,7 @@ def test_generate_raises_on_length_mismatch(monkeypatch, fake_stage_config):
 
     from vllm_omni.entrypoints.omni import Omni
 
-    omni = Omni(model="any", init_timeout=1)
+    omni = Omni(model=MODEL, init_timeout=1)
     with pytest.raises(ValueError):
         omni.generate(prompts=["hi"], sampling_params_list=[])
 
@@ -684,7 +686,7 @@ def test_generate_pipeline_and_final_outputs(monkeypatch, fake_stage_config):
 
     from vllm_omni.entrypoints.omni import Omni
 
-    omni = Omni(model="any", init_timeout=1)
+    omni = Omni(model=MODEL, init_timeout=1)
 
     # Generate the expected request ID format: "0_<uuid>"
     expected_request_id = f"0_{test_uuid}"
@@ -785,7 +787,7 @@ def test_generate_pipeline_with_batch_input(monkeypatch, fake_stage_config):
 
     from vllm_omni.entrypoints.omni import Omni
 
-    omni = Omni(model="any", init_timeout=1)
+    omni = Omni(model=MODEL, init_timeout=1)
 
     # Generate the expected request ID format: "0_<uuid>"
     expected_request_id = f"0_{test_uuid}"
@@ -899,7 +901,7 @@ def test_generate_no_final_output_returns_empty(monkeypatch, fake_stage_config):
 
     from vllm_omni.entrypoints.omni import Omni
 
-    omni = Omni(model="any", init_timeout=1)
+    omni = Omni(model=MODEL, init_timeout=1)
 
     # Generate the expected request ID format: "0_<uuid>"
     expected_request_id = f"0_{test_uuid}"
@@ -985,7 +987,7 @@ def test_generate_sampling_params_none_use_default(monkeypatch, fake_stage_confi
 
     from vllm_omni.entrypoints.omni import Omni
 
-    omni = Omni(model="any", init_timeout=1)
+    omni = Omni(model=MODEL, init_timeout=1)
 
     # Generate the expected request ID format: "0_<uuid>"
     expected_request_id = f"0_{test_uuid}"
@@ -1065,7 +1067,7 @@ def test_wait_for_stages_ready_timeout(monkeypatch, fake_stage_config):
     from vllm_omni.entrypoints.omni import Omni
 
     # Use very short timeout
-    omni = Omni(model="any", init_timeout=0.01)
+    omni = Omni(model=MODEL, init_timeout=0.01)
     # Verify that no stages are ready
     assert len(omni._stages_ready) == 0
 
@@ -1119,7 +1121,7 @@ def test_generate_handles_error_messages(monkeypatch, fake_stage_config):
 
     from vllm_omni.entrypoints.omni import Omni
 
-    omni = Omni(model="any", init_timeout=1)
+    omni = Omni(model=MODEL, init_timeout=1)
 
     # Generate the expected request ID format: "0_<uuid>"
     expected_request_id = f"0_{test_uuid}"
@@ -1194,7 +1196,7 @@ def test_close_sends_shutdown_signal(monkeypatch, fake_stage_config):
 
     from vllm_omni.entrypoints.omni import Omni
 
-    omni = Omni(model="any", init_timeout=1)
+    omni = Omni(model=MODEL, init_timeout=1)
 
     # Call close
     omni.close()
