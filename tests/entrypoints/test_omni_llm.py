@@ -850,6 +850,9 @@ def test_generate_no_final_output_returns_empty(monkeypatch, fake_stage_config):
 
     monkeypatch.setattr(omni_module, "load_and_resolve_stage_configs", _fake_loader)
     monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(cfg, **kwargs))
+    # Apply connector and adapter mocks after importing omni module
+    _setup_connector_mocks(monkeypatch, omni_module)
+    _setup_connector_adapter_mock(monkeypatch, omni_module)
 
     # Mock uuid.uuid4() to return a predictable value for request ID generation
     test_uuid = uuid.UUID("00000000-0000-0000-0000-000000000000")
@@ -937,6 +940,9 @@ def test_generate_sampling_params_none_use_default(monkeypatch, fake_stage_confi
 
     monkeypatch.setattr(omni_module, "load_and_resolve_stage_configs", _fake_loader)
     monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(cfg, **kwargs))
+    # Apply connector and adapter mocks after importing omni module
+    _setup_connector_mocks(monkeypatch, omni_module)
+    _setup_connector_adapter_mock(monkeypatch, omni_module)
 
     # Mock uuid.uuid4() to return a predictable value for request ID generation
     test_uuid = uuid.UUID("00000000-0000-0000-0000-000000000000")
