@@ -435,8 +435,14 @@ def _setup_connector_mocks(monkeypatch):
         raising=False,
     )
 
+
+def _setup_connector_adapter_mock(monkeypatch):
+    """Helper function to mock try_send_via_connector after module deletion.
+
+    This must be called AFTER deleting modules from sys.modules but BEFORE importing omni module.
+    """
+
     # Mock try_send_via_connector to always succeed
-    # Mock at the source (adapter module) so it works when imported by omni module
     def _fake_try_send_via_connector(
         connector,
         stage_id,
@@ -458,14 +464,9 @@ def _setup_connector_mocks(monkeypatch):
         return True
 
     # Mock in the adapter module where it's defined
+    # This must happen after the module is deleted so the mock is applied to the fresh import
     monkeypatch.setattr(
         "vllm_omni.distributed.omni_connectors.adapter.try_send_via_connector",
-        _fake_try_send_via_connector,
-        raising=False,
-    )
-    # Also mock in the omni module where it's imported
-    monkeypatch.setattr(
-        "vllm_omni.entrypoints.omni.try_send_via_connector",
         _fake_try_send_via_connector,
         raising=False,
     )
@@ -750,6 +751,8 @@ def test_generate_pipeline_and_final_outputs(monkeypatch, fake_stage_config):
     _setup_ipc_mocks(monkeypatch)
     _setup_log_mocks(monkeypatch)
     _setup_connector_mocks(monkeypatch)
+    # Apply adapter mock after module deletion
+    _setup_connector_adapter_mock(monkeypatch)
 
     monkeypatch.setattr(
         "vllm_omni.entrypoints.utils.load_and_resolve_stage_configs",
@@ -853,6 +856,8 @@ def test_generate_pipeline_with_batch_input(monkeypatch, fake_stage_config):
     _setup_ipc_mocks(monkeypatch)
     _setup_log_mocks(monkeypatch)
     _setup_connector_mocks(monkeypatch)
+    # Apply adapter mock after module deletion
+    _setup_connector_adapter_mock(monkeypatch)
 
     monkeypatch.setattr(
         "vllm_omni.entrypoints.utils.load_and_resolve_stage_configs",
@@ -969,6 +974,8 @@ def test_generate_no_final_output_returns_empty(monkeypatch, fake_stage_config):
     _setup_ipc_mocks(monkeypatch)
     _setup_log_mocks(monkeypatch)
     _setup_connector_mocks(monkeypatch)
+    # Apply adapter mock after module deletion
+    _setup_connector_adapter_mock(monkeypatch)
 
     monkeypatch.setattr(
         "vllm_omni.entrypoints.utils.load_and_resolve_stage_configs",
@@ -1057,6 +1064,8 @@ def test_generate_sampling_params_none_use_default(monkeypatch, fake_stage_confi
     _setup_ipc_mocks(monkeypatch)
     _setup_log_mocks(monkeypatch)
     _setup_connector_mocks(monkeypatch)
+    # Apply adapter mock after module deletion
+    _setup_connector_adapter_mock(monkeypatch)
 
     monkeypatch.setattr(
         "vllm_omni.entrypoints.utils.load_and_resolve_stage_configs",
