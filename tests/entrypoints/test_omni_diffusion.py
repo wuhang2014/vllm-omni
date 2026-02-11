@@ -73,29 +73,48 @@ class _FakeQueue:
 
 
 class _FakeZmqQueue:
-    """Fake ZmqQueue that wraps _FakeQueue and adds endpoint attribute."""
+    """Fake ZmqQueue that wraps _FakeQueue and matches ZmqQueue interface."""
 
-    def __init__(self, endpoint=None, maxsize=0):
-        self._queue = _FakeQueue(maxsize=maxsize)
-        self.endpoint = endpoint or f"fake://zmq-endpoint-{id(self)}"
+    def __init__(
+        self,
+        ctx=None,
+        socket_type=None,
+        *,
+        bind: str | None = None,
+        connect: str | None = None,
+        recv_timeout_ms: int | None = None,
+        send_timeout_ms: int | None = None,
+    ):
+        """Initialize fake ZMQ queue with same signature as real ZmqQueue."""
+        self._queue = _FakeQueue(maxsize=0)
+        # Determine endpoint from bind or connect
+        path = bind if bind is not None else connect
+        self.endpoint = path or f"fake://zmq-endpoint-{id(self)}"
+        self._recv_timeout_ms = recv_timeout_ms
+        self._send_timeout_ms = send_timeout_ms
 
-    def put(self, item):
-        self._queue.put(item)
+    def put(self, obj: Any) -> None:
+        """Send an object to the queue."""
+        self._queue.put(obj)
 
-    def put_nowait(self, item):
-        self._queue.put_nowait(item)
+    def put_nowait(self, obj: Any) -> None:
+        """Send an object to the queue without blocking."""
+        self._queue.put_nowait(obj)
 
-    def get(self, timeout=None):
+    def get(self, timeout: float | None = None) -> Any:
+        """Receive an object from the queue with optional timeout in seconds."""
         return self._queue.get(timeout=timeout)
 
-    def get_nowait(self):
+    def get_nowait(self) -> Any:
+        """Receive an object from the queue without blocking."""
         return self._queue.get_nowait()
 
-    def empty(self):
+    def empty(self) -> bool:
+        """Check if the queue is empty without blocking."""
         return self._queue.empty()
 
-    def close(self):
-        """Mock close method for ZmqQueue."""
+    def close(self) -> None:
+        """Close the queue."""
         pass
 
 
@@ -303,13 +322,13 @@ def _setup_multiprocessing_mocks(monkeypatch):
 
     # Mock ZmqQueue to use _FakeZmqQueue
     monkeypatch.setattr(
-        "vllm_omni.entrypoints.omni_stage.ZmqQueue",
+        "vllm_omni.entrypoints.zmq_utils.ZmqQueue",
         _FakeZmqQueue,
         raising=False,
     )
-    # Also mock in the zmq_queue module if it exists
+    # Also mock where ZmqQueue is imported/used
     monkeypatch.setattr(
-        "vllm_omni.entrypoints.zmq_queue.ZmqQueue",
+        "vllm_omni.entrypoints.omni_stage.ZmqQueue",
         _FakeZmqQueue,
         raising=False,
     )
