@@ -755,8 +755,25 @@ def test_generate_pipeline_and_final_outputs(monkeypatch, fake_stage_config):
 
     import vllm_omni.entrypoints.omni as omni_module
 
+    # Re-apply connector mock to the imported module since it imports try_send_via_connector
+    def _fake_try_send_via_connector(
+        connector,
+        stage_id,
+        next_stage_id,
+        req_id,
+        next_inputs,
+        sampling_params,
+        original_prompt,
+        next_stage_queue_submit_fn,
+        metrics,
+    ):
+        task = {"request_id": req_id, "engine_inputs": next_inputs, "sampling_params": sampling_params}
+        next_stage_queue_submit_fn(task)
+        return True
+
     monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(cfg, **kwargs))
     monkeypatch.setattr(omni_module, "load_and_resolve_stage_configs", _fake_loader)
+    monkeypatch.setattr(omni_module, "try_send_via_connector", _fake_try_send_via_connector)
 
     # Mock uuid.uuid4() to return a predictable value for request ID generation
     test_uuid = uuid.UUID("00000000-0000-0000-0000-000000000000")
@@ -857,8 +874,25 @@ def test_generate_pipeline_with_batch_input(monkeypatch, fake_stage_config):
 
     import vllm_omni.entrypoints.omni as omni_module
 
+    # Re-apply connector mock to the imported module since it imports try_send_via_connector
+    def _fake_try_send_via_connector(
+        connector,
+        stage_id,
+        next_stage_id,
+        req_id,
+        next_inputs,
+        sampling_params,
+        original_prompt,
+        next_stage_queue_submit_fn,
+        metrics,
+    ):
+        task = {"request_id": req_id, "engine_inputs": next_inputs, "sampling_params": sampling_params}
+        next_stage_queue_submit_fn(task)
+        return True
+
     monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(cfg, **kwargs))
     monkeypatch.setattr(omni_module, "load_and_resolve_stage_configs", _fake_loader)
+    monkeypatch.setattr(omni_module, "try_send_via_connector", _fake_try_send_via_connector)
 
     # Mock uuid.uuid4() to return a predictable value for request ID generation
     test_uuid = uuid.UUID("00000000-0000-0000-0000-000000000000")
@@ -1059,8 +1093,25 @@ def test_generate_sampling_params_none_use_default(monkeypatch, fake_stage_confi
 
     import vllm_omni.entrypoints.omni as omni_module
 
+    # Re-apply connector mock to the imported module since it imports try_send_via_connector
+    def _fake_try_send_via_connector(
+        connector,
+        stage_id,
+        next_stage_id,
+        req_id,
+        next_inputs,
+        sampling_params,
+        original_prompt,
+        next_stage_queue_submit_fn,
+        metrics,
+    ):
+        task = {"request_id": req_id, "engine_inputs": next_inputs, "sampling_params": sampling_params}
+        next_stage_queue_submit_fn(task)
+        return True
+
     monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(cfg, **kwargs))
     monkeypatch.setattr(omni_module, "load_and_resolve_stage_configs", _fake_loader)
+    monkeypatch.setattr(omni_module, "try_send_via_connector", _fake_try_send_via_connector)
 
     # Mock uuid.uuid4() to return a predictable value for request ID generation
     test_uuid = uuid.UUID("00000000-0000-0000-0000-000000000000")
