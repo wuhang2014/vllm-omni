@@ -708,6 +708,12 @@ def _stage_worker(
             in_q = create_zmq_queue(zmq_ctx, in_q, zmq.PULL)
         if isinstance(out_q, str):
             out_q = create_zmq_queue(zmq_ctx, out_q, zmq.PUSH)
+        # When using ZMQ (cross-node IPC), disable SHM so data is sent inline.
+        shm_threshold_bytes = sys.maxsize
+        logger.info(
+            "[Stage-%s] ZMQ transport detected; disabling SHM IPC (shm_threshold_bytes set to maxsize)",
+            stage_id,
+        )
 
     # Aggregates for running average
     _agg_total_tokens = 0
@@ -1102,6 +1108,12 @@ async def _stage_worker_async(
             in_q = create_zmq_queue(zmq_ctx, in_q, zmq.PULL)
         if isinstance(out_q, str):
             out_q = create_zmq_queue(zmq_ctx, out_q, zmq.PUSH)
+        # When using ZMQ (cross-node IPC), disable SHM so data is sent inline.
+        shm_threshold_bytes = sys.maxsize
+        logger.info(
+            "[Stage-%s] ZMQ transport detected; disabling SHM IPC (shm_threshold_bytes set to maxsize)",
+            stage_id,
+        )
 
     # Aggregates for running average
     _agg_total_tokens = 0
