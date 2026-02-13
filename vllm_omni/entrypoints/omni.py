@@ -167,8 +167,8 @@ class OmniBase:
         self._handshake_thread: threading.Thread | None = None
         self._handshake_stop: threading.Event | None = None
         self._handshake_endpoints: dict[int, tuple[str, str]] = {}
-        self._handshake_seen: set[int] = set()
-        self._single_stage_id: int | None = None
+        self._handshake_seen: set[int] = set()  # Track which stage IDs have completed ZMQ handshake
+        self._single_stage_id: int | None = None  # Optional: deploy only a specific stage ID
 
         # Initialize stages - each stage will create appropriate instance based on stage_type
         # Stage workers will automatically create OmniLLM or OmniDiffusion instances
@@ -356,11 +356,12 @@ class OmniBase:
             self._ray_pg = create_placement_group(
                 number_of_stages=len(self.stage_list), address=self.ray_address, strategy="PACK"
             )
+        else:
+            # Initialize ZMQ context
+            if self._zmq_ctx is None:
+                self._zmq_ctx = zmq.Context()
 
-        if self.worker_backend != "ray" and self._zmq_ctx is None:
-            self._zmq_ctx = zmq.Context()
-
-        if self.worker_backend != "ray":
+            # Allocate endpoints for each stage
             total_stages = len(self.stage_configs)
             self._handshake_endpoints = {}
             for sid in range(total_stages):
@@ -371,7 +372,7 @@ class OmniBase:
                     f"[{self._name}] Allocated endpoints for stage-{sid}: in={in_endpoint}, out={out_endpoint}"
                 )
 
-        if self.worker_backend != "ray":
+            # Start handshake server
             self.start_handshake_server()
 
         for stage_id, stage in enumerate[OmniStage](self.stage_list):
@@ -424,15 +425,15 @@ class OmniBase:
 
             logger.debug(f"[{self._name}] Stage-{stage_id} process started")
 
-        if self._single_stage_id is not None and self.worker_backend != "ray":
-            self._wait_for_handshakes()
-
     def _process_stage_ready(self, stage: OmniStage, stage_id: int, result: dict[str, Any]) -> None:
         self._stages_ready.add(stage_id)
         logger.info(f"[{self._name}] Stage-{stage_id} reported ready")
 
     def _wait_for_stages_ready(self, timeout: int = 120) -> None:
         """Wait for all stages to report readiness with optimized polling."""
+        if self._single_stage_id is not None and self.worker_backend != "ray":
+            timeout = self._wait_for_handshakes(timeout)
+
         num_stages = len(self.stage_list)
         deadline = time.time() + max(0, int(timeout))
 
@@ -667,14 +668,38 @@ class OmniBase:
         )
         self._handshake_thread.start()
 
-    def _wait_for_handshakes(self) -> None:
+    def _wait_for_handshakes(self, timeout: int = 120) -> int:
+        """Wait for handshakes from all expected stages.
+
+        Args:
+            timeout: Timeout in seconds for waiting for handshakes. Default is 120s.
+
+        Returns:
+            Remaining timeout in seconds after waiting for handshakes.
+        """
         total_stages = len(self.stage_configs)
         expected = set(range(total_stages)) - {int(self._single_stage_id)}
         if not expected:
-            return
-        logger.info(f"[{self._name}] Waiting for handshakes from stages: {expected}")
-        while not expected.issubset(self._handshake_seen):
+            return timeout
+
+        deadline = time.time() + max(0, int(timeout))
+        logger.info(f"[{self._name}] Waiting for handshakes from stages: {expected} (timeout: {timeout}s)")
+
+        # _handshake_seen grows monotonically,
+        # so it will eventually be consistent with the actual handshaked stage number
+        while not expected.issubset(self._handshake_seen) and time.time() < deadline:
             time.sleep(1.0)
+
+        remaining_timeout = max(0, int(deadline - time.time()))
+
+        if not expected.issubset(self._handshake_seen):
+            missing = sorted(expected - self._handshake_seen)
+            logger.warning(
+                f"[{self._name}] Handshake timeout: {len(self._handshake_seen)}/{len(expected)} "
+                f"stages completed handshake. Missing stages: {missing}"
+            )
+
+        return remaining_timeout
 
     @property
     def _name(self) -> str:
