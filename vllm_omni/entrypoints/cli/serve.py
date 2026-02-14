@@ -74,7 +74,7 @@ class OmniServeCommand(CLISubcommand):
             uvloop.run(omni_run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
-        if args.stage_id and (args.omni_master_address is None or args.omni_master_port is None):
+        if args.stage_id is not None and (args.omni_master_address is None or args.omni_master_port is None):
             raise ValueError("--stage-id requires both --omni-master-address and --omni-master-port to be set")
 
         # Skip validation for diffusion models as they have different requirements
