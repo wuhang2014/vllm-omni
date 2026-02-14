@@ -84,12 +84,18 @@ def _weak_close_cleanup(
             except Exception as e:
                 logger.warning(f"Failed to stop stage worker: {e}")
     try_close_ray(ray_pg)
+
+    # Gracefully shutdown handshake server thread
     if handshake_stop is not None:
         handshake_stop.set()
+    if handshake_thread is not None:
+        handshake_thread.join(timeout=2.0)
+        if handshake_thread.is_alive():
+            logger.warning("Handshake server thread did not terminate gracefully within timeout")
+
+    # Close ZMQ resources after thread has exited
     if zmq_handshake_socket is not None:
         zmq_handshake_socket.close(0)
-    if handshake_thread is not None:
-        handshake_thread.join(timeout=1.0)
     if zmq_ctx is not None:
         zmq_ctx.term()
 
