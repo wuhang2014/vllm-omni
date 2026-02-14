@@ -685,8 +685,14 @@ class OmniBase:
         deadline = time.time() + max(0, int(timeout))
         logger.info(f"[{self._name}] Waiting for handshakes from stages: {expected} (timeout: {timeout}s)")
 
-        # _handshake_seen grows monotonically,
-        # so it will eventually be consistent with the actual handshaked stage number
+        # NOTE: _handshake_seen may be updated from the handshake server thread.
+        # It is intentionally used here without additional locking because:
+        #   - _handshake_seen only ever grows (stages are added but never removed), and
+        #   - we only check membership and set inclusion relative to `expected`.
+        # Under these monotonic semantics and the CPython GIL, concurrent reads/writes
+        # are safe for this usage and cannot violate correctness: we may observe a
+        # slightly stale view, but the loop condition remains valid and eventually
+        # becomes true once all expected stages have handshaked or the timeout elapses.
         while not expected.issubset(self._handshake_seen) and time.time() < deadline:
             time.sleep(1.0)
 
