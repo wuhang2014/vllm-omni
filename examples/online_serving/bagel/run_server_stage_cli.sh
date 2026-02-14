@@ -24,9 +24,6 @@ vllm serve "$MODEL" --omni \
     -oma "$MASTER_ADDRESS" \
     -omp "$MASTER_PORT" &
 
-# Give stage 1 a moment to initialize
-sleep 2
-
 # Start stage 0 (Thinker) as master with API server
 echo "Starting Stage 0 (Thinker) as master..."
 vllm serve "$MODEL" --omni \
