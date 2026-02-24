@@ -21,7 +21,6 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.utils import get_engine_client_zmq_addr
 
-from vllm_omni.entrypoints.cli.logo import log_logo
 from vllm_omni.distributed.omni_connectors import (
     get_connectors_config_for_stage,
     load_omni_transfer_config,
@@ -29,6 +28,7 @@ from vllm_omni.distributed.omni_connectors import (
 from vllm_omni.distributed.omni_connectors.utils.initialization import (
     resolve_omni_kv_config_for_stage,
 )
+from vllm_omni.entrypoints.cli.logo import log_logo
 from vllm_omni.entrypoints.omni import OmniBase, omni_snapshot_download
 from vllm_omni.entrypoints.omni_stage import OmniStage
 from vllm_omni.entrypoints.openai.api_server import omni_run_server
