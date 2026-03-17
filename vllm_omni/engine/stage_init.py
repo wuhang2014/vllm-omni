@@ -61,6 +61,10 @@ class StartedLlmStage:
     engine_manager: Any
     coordinator: Any
     addresses: Any
+    # Set for remote stages in single-stage mode. When non-None,
+    # _attach_llm_stage uses the stored master metadata to bind a
+    # StageEngineCoreClient to the pre-allocated remote addresses.
+    remote_client: Any = None
 
 
 def extract_stage_metadata(stage_config: Any) -> StageMetadata:

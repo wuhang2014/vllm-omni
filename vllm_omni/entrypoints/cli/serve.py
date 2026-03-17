@@ -6,8 +6,10 @@ diffusion models (e.g., Qwen-Image) through the same CLI interface.
 """
 
 import argparse
+import functools
 import json
 import os
+import signal
 from typing import Any
 
 import uvloop
@@ -365,121 +367,144 @@ def _create_default_diffusion_stage_cfg(args: argparse.Namespace) -> list[dict[s
 
 
 def run_headless(args: argparse.Namespace) -> None:
-    """Run a single stage in headless mode."""
+    """Run a single stage in headless mode.
 
-    raise NotImplementedError("Headless mode is not yet implemented. Stay tuned!")
-    # if args.api_server_count is not None and args.api_server_count > 1:
-    #     raise ValueError("api_server_count can't be set in headless mode")
-    # if args.worker_backend != "multi_process":
-    #     raise ValueError("headless mode requires worker_backend=multi_process")
+    Registers with the OmniMasterServer at ``--omni-master-address:--omni-master-port``,
+    receives a per-stage handshake address, then runs the vLLM engine core loop
+    (blocking until the process is terminated).
+    """
+    from vllm.v1.engine.utils import CoreEngineProcManager
+    from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+    from vllm.version import __version__ as VLLM_VERSION
 
-    # model = omni_snapshot_download(args.model)
+    from vllm_omni.engine.omni_core_engine import run_omni_engine_core
+    from vllm_omni.engine.stage_init import (
+        build_engine_args_dict,
+        build_vllm_config,
+        get_stage_connector_spec,
+        load_omni_transfer_config_for_model,
+        prepare_engine_environment,
+    )
+    from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 
-    # omni_base = OmniBase.__new__(OmniBase)
-    # args_dict = vars(args).copy()
-    # args_dict["model"] = model
-    # config_path, stage_configs = omni_base._resolve_stage_configs(model, args_dict)
+    model = args.model
+    stage_id: int | None = args.stage_id
+    omni_master_address: str | None = args.omni_master_address
+    omni_master_port: int | None = args.omni_master_port
 
-    # single_stage_id = args.stage_id
-    # if single_stage_id is None:
-    #     if len(stage_configs) != 1:
-    #         raise ValueError("--stage-id is required in headless mode for multi-stage configs")
-    #     single_stage_id = getattr(stage_configs[0], "stage_id", 0)
+    if stage_id is None:
+        raise ValueError("--stage-id is required in headless mode")
+    if omni_master_address is None or omni_master_port is None:
+        raise ValueError("--omni-master-address and --omni-master-port are required in headless mode")
+    if getattr(args, "api_server_count", 0) and args.api_server_count > 1:
+        raise ValueError("api_server_count can't be set in headless mode")
+    if args.worker_backend != "multi_process":
+        raise ValueError("headless mode requires worker_backend=multi_process")
 
-    # stage_config = None
-    # for cfg in stage_configs:
-    #     if getattr(cfg, "stage_id", None) == single_stage_id:
-    #         stage_config = cfg
-    #         break
-    # if stage_config is None:
-    #     raise ValueError(f"No stage matches stage_id={single_stage_id}.")
+    args_dict = vars(args).copy()
+    config_path, stage_configs = load_and_resolve_stage_configs(
+        model,
+        args_dict.get("stage_configs_path"),
+        args_dict,
+    )
 
-    # # TODO(wuhang): Support connectors config by cli
-    # transfer_config = load_omni_transfer_config(config_path, default_shm_threshold=args.shm_threshold_bytes)
-    # connectors_config = get_connectors_config_for_stage(transfer_config, single_stage_id)
+    # Locate the stage config that matches stage_id.
+    stage_cfg = None
+    for cfg in stage_configs:
+        if getattr(cfg, "stage_id", None) == stage_id:
+            stage_cfg = cfg
+            break
+    if stage_cfg is None:
+        raise ValueError(
+            f"No stage config found for stage_id={stage_id}. "
+            f"Available stage ids: {[getattr(c, 'stage_id', None) for c in stage_configs]}"
+        )
 
-    # omni_master_address = args.omni_master_address
-    # omni_master_port = args.omni_master_port
+    prepare_engine_environment()
+    omni_transfer_config = load_omni_transfer_config_for_model(model, config_path)
 
-    # # Perform handshake with orchestrator to get dynamically allocated endpoints
-    # with zmq.Context() as zmq_ctx:
-    #     handshake_endpoint = get_engine_client_zmq_addr(
-    #         local_only=False, host=omni_master_address, port=omni_master_port
-    #     )
+    stage_connector_spec = get_stage_connector_spec(
+        omni_transfer_config=omni_transfer_config,
+        stage_id=stage_id,
+        async_chunk=False,
+    )
 
-    #     with make_zmq_socket(zmq_ctx, handshake_endpoint, zmq.REQ, bind=False, linger=5000) as handshake_socket:
-    #         # TODO(wuhang): Define protocol in python dataclass.
-    #         handshake_msg = {"type": "handshake", "stage_id": single_stage_id}
-    #         handshake_socket.send(msgspec.msgpack.encode(handshake_msg))
+    # Device assignment is managed externally (e.g. CUDA_VISIBLE_DEVICES);
+    # runtime_cfg is intentionally ignored in headless mode.
+    engine_args_dict = build_engine_args_dict(
+        stage_cfg,
+        model,
+        stage_connector_spec=stage_connector_spec,
+    )
+    vllm_config, executor_class = build_vllm_config(
+        stage_cfg,
+        model,
+        stage_connector_spec=stage_connector_spec,
+        engine_args_dict=engine_args_dict,
+    )
+    parallel_config = vllm_config.parallel_config
+    local_engine_count = parallel_config.data_parallel_size_local
 
-    #         # Wait for response with timeout
-    #         if not handshake_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * 60_000):
-    #             raise RuntimeError(
-    #                 f"Handshake timeout ({HANDSHAKE_TIMEOUT_MINS} minutes) for stage-{single_stage_id} "
-    #                 f"at {handshake_endpoint}"
-    #             )
+    if local_engine_count <= 0:
+        raise ValueError("data_parallel_size_local must be > 0 in headless mode")
 
-    #         try:
-    #             response = msgspec.msgpack.decode(handshake_socket.recv())
-    #         except msgspec.DecodeError as exc:
-    #             raise RuntimeError(
-    #                 f"Handshake decode failed for stage-{single_stage_id} at {handshake_endpoint}: {exc}"
-    #             ) from exc
-    #         except Exception as exc:  # pragma: no cover - unexpected decode errors
-    #             raise RuntimeError(
-    #                 f"Unexpected error decoding handshake for stage-{single_stage_id} at {handshake_endpoint}: {exc}"
-    #             ) from exc
+    shutdown_requested = False
 
-    #         if not response["ok"]:
-    #             error_msg = response["error"]
-    #             raise RuntimeError(f"Handshake failed for stage-{single_stage_id}: {error_msg}")
+    def signal_handler(signum, frame):
+        nonlocal shutdown_requested
+        logger.debug("Received %d signal.", signum)
+        if not shutdown_requested:
+            shutdown_requested = True
+            raise SystemExit
 
-    #         in_endpoint, out_endpoint = response["in_endpoint"], response["out_endpoint"]
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
 
-    #         logger.info(
-    #             f"[Headless] Stage-{single_stage_id} received endpoints via handshake: "
-    #             f"in={in_endpoint}, out={out_endpoint}"
-    #         )
+    if parallel_config.node_rank_within_dp > 0:
+        head_node_address = f"{parallel_config.master_addr}:{parallel_config.master_port}"
+        logger.info(
+            "Launching vLLM-Omni (v%s) headless multiproc executor, "
+            "with head node address %s for torch.distributed process group.",
+            VLLM_VERSION,
+            head_node_address,
+        )
 
-    # shutdown_requested = False
+        executor = MultiprocExecutor(vllm_config, monitor_workers=False)
+        executor.start_worker_monitor(inline=True)
+        return
 
-    # def signal_handler(signum, frame):
-    #     nonlocal shutdown_requested
-    #     if shutdown_requested:
-    #         return
-    #     shutdown_requested = True
-    #     raise SystemExit
+    logger.info(
+        "[Headless] Launching %d engine core(s) for stage %d via OmniMasterServer at %s:%d",
+        local_engine_count,
+        stage_id,
+        omni_master_address,
+        omni_master_port,
+    )
 
-    # signal.signal(signal.SIGTERM, signal_handler)
-    # signal.signal(signal.SIGINT, signal_handler)
+    target_fn = functools.partial(
+        run_omni_engine_core,
+        omni_master_address=omni_master_address,
+        omni_master_port=omni_master_port,
+        omni_stage_id=stage_id,
+    )
 
-    # stage = OmniStage(stage_config, stage_init_timeout=args.stage_init_timeout)
-    # stage.attach_queues(in_endpoint, out_endpoint)
+    engine_manager = CoreEngineProcManager(
+        target_fn=target_fn,
+        local_engine_count=local_engine_count,
+        start_index=parallel_config.data_parallel_rank,
+        local_start_index=parallel_config.data_parallel_rank_local or 0,
+        vllm_config=vllm_config,
+        local_client=False,
+        handshake_address="tcp://0.0.0.0:0",
+        executor_class=executor_class,
+        log_stats=not getattr(args, "disable_log_stats", False),
+    )
 
-    # # Inject YAML-resolved connector config into omni_kv_config for in-engine usage.
-    # try:
-    #     omni_conn_cfg, omni_from, omni_to = resolve_omni_kv_config_for_stage(transfer_config, single_stage_id)
-    #     if omni_conn_cfg:
-    #         inject_omni_kv_config(stage, omni_conn_cfg, omni_from, omni_to)  # type: ignore
-    # except Exception as e:
-    #     logger.debug("[Headless] Failed to inject omni connector config into stage-%s: %s", single_stage_id, e)
-
-    # old_env = os.environ.get("VLLM_LOGGING_PREFIX")
-    # os.environ["VLLM_LOGGING_PREFIX"] = f"[Stage-{single_stage_id}] {'' if old_env is None else old_env}"
-    # try:
-    #     stage.init_stage_worker(
-    #         model,
-    #         is_async=True,
-    #         shm_threshold_bytes=int(args.shm_threshold_bytes),
-    #         batch_timeout=int(args.batch_timeout),
-    #         connectors_config=connectors_config,
-    #         worker_backend="multi_process",
-    #         ignore_runtime_config=True,
-    #     )
-    #     if stage._proc is not None:
-    #         stage._proc.join()
-    # finally:
-    #     stage.stop_stage_worker()
+    try:
+        engine_manager.join_first()
+    finally:
+        logger.info("[Headless] Shutting down stage %d.", stage_id)
+        engine_manager.close()
 
 
 def cmd_init() -> list[CLISubcommand]:
