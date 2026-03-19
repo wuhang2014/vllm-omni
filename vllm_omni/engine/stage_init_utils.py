@@ -263,6 +263,7 @@ def build_vllm_config(
     model: str,
     stage_connector_spec: dict[str, Any] | None = None,
     engine_args_dict: dict[str, Any] | None = None,
+    headless: bool = False,
 ) -> tuple[Any, type]:
     """Build engine args, then create VllmConfig and executor_class.
 
@@ -278,7 +279,10 @@ def build_vllm_config(
 
     filtered_engine_args_dict = filter_dataclass_kwargs(OmniEngineArgs, engine_args_dict)
     omni_engine_args = OmniEngineArgs(**filtered_engine_args_dict)
-    vllm_config = omni_engine_args.create_engine_config(usage_context=UsageContext.LLM_CLASS)
+    vllm_config = omni_engine_args.create_engine_config(
+        usage_context=UsageContext.LLM_CLASS,
+        headless=headless,
+    )
     executor_class = Executor.get_class(vllm_config)
 
     return vllm_config, executor_class

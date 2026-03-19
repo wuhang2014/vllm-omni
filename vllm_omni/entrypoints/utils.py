@@ -1,7 +1,7 @@
 import os
 import types
 from collections import Counter
-from dataclasses import asdict, fields, is_dataclass
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any, get_args, get_origin
 
@@ -9,7 +9,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config, get_hf_file_to_dict
 from vllm.transformers_utils.repo_utils import file_or_path_exists
 
-from vllm_omni.config.yaml_util import create_config, load_yaml_config, merge_configs
+from vllm_omni.config.yaml_util import create_config, load_yaml_config
 from vllm_omni.entrypoints.stage_utils import _to_dict
 from vllm_omni.platforms import current_omni_platform
 
@@ -144,7 +144,10 @@ def _convert_dataclasses_to_dict(obj: Any) -> Any:
     # Note: asdict() recursively converts nested dataclasses but not Counter objects,
     # so we need to recursively process the result
     if is_dataclass(obj):
-        result = asdict(obj)
+        # Only include init=True fields to avoid passing runtime-only fields
+        # (e.g. CompilationConfig has init=False fields like enabled_custom_ops,
+        # compilation_time, etc. that pydantic rejects when passed back to __init__)
+        result = {f.name: getattr(obj, f.name) for f in fields(obj) if f.init}
         # Recursively process the result to convert any Counter objects
         return _convert_dataclasses_to_dict(result)
     # Handle dictionaries (recurse into values) and filter out callables(cause error in OmegaConf.create)
@@ -275,25 +278,24 @@ def load_stage_configs_from_yaml(config_path: str, base_engine_args: dict | None
     """
     if base_engine_args is None:
         base_engine_args = {}
-    config_data = load_yaml_config(config_path)
-    stage_args = config_data.stage_args
+    config_data = _to_dict(load_yaml_config(config_path))
+    stage_args = config_data["stage_args"]
     global_async_chunk = config_data.get("async_chunk", False)
-    # Convert any nested dataclass objects to dicts before creating DictConfig
+    # Convert any nested dataclass objects to dicts before merging
     base_engine_args = _convert_dataclasses_to_dict(base_engine_args)
-    base_engine_args = create_config(base_engine_args)
     for stage_arg in stage_args:
         base_engine_args_tmp = base_engine_args.copy()
         # Update base_engine_args with stage-specific engine_args if they exist
-        if hasattr(stage_arg, "engine_args") and stage_arg.engine_args is not None:
-            base_engine_args_tmp = create_config(merge_configs(base_engine_args_tmp, stage_arg.engine_args))
-        stage_type = getattr(stage_arg, "stage_type", "llm")
-        if hasattr(stage_arg, "runtime") and stage_arg.runtime is not None and stage_type != "diffusion":
-            runtime_cfg = stage_arg.runtime
+        if stage_arg.get("engine_args") is not None:
+            base_engine_args_tmp = {**base_engine_args_tmp, **stage_arg["engine_args"]}
+        stage_type = stage_arg.get("stage_type", "llm")
+        if stage_arg.get("runtime") is not None and stage_type != "diffusion":
+            runtime_cfg = stage_arg["runtime"]
             max_batch_size = int(runtime_cfg.get("max_batch_size", 1) or 1)
             base_engine_args_tmp["max_num_seqs"] = max_batch_size
-            base_engine_args_tmp.async_chunk = global_async_chunk
-        stage_arg.engine_args = base_engine_args_tmp
-    return stage_args
+            base_engine_args_tmp["async_chunk"] = global_async_chunk
+        stage_arg["engine_args"] = base_engine_args_tmp
+    return create_config(stage_args)
 
 
 def load_and_resolve_stage_configs(

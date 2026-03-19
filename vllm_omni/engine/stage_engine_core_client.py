@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core_client import AsyncMPClient
+from vllm.v1.engine.core_client import AsyncMPClient, DPLBAsyncMPClient
 
 from vllm_omni.engine.stage_init_utils import StageMetadata
 
@@ -22,17 +22,50 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class StageEngineCoreClient(AsyncMPClient):
-    """Stage async client that inherits from vLLM's AsyncMPClient.
+class StageEngineCoreClientBase:
+    """Shared stage-aware behavior for async EngineCore clients.
 
-    Fully reuses AsyncMPClient.__init__ for:
+    The concrete transport/load-balancing behavior is supplied by the
+    multiprocessing client subclass in the MRO.
+
+    Fully reuses the underlying vLLM async MP client ``__init__`` for:
     - ZMQ setup, sockets
     - launch_core_engines() -> EngineCoreProc
     - outputs_queue, output_queue_task
     - All utility methods (shutdown, get_output_async, abort_requests_async, etc.)
 
-    This is the async version of StageMPClient, designed for use with AsyncOmniEngine.
+    This is the async version of StageMPClient, designed for use with
+    AsyncOmniEngine.
     """
+
+    @staticmethod
+    def make_async_mp_client(
+        vllm_config: Any,
+        executor_class: type,
+        metadata: StageMetadata,
+        client_addresses: dict[str, str] | None = None,
+        engine_manager: Any = None,
+        coordinator: Any = None,
+        client_count: int = 1,
+        client_index: int = 0,
+    ) -> StageEngineCoreClient | DPLBStageEngineCoreClient:
+        """Create the appropriate stage async client for the DP mode."""
+        parallel_config = vllm_config.parallel_config
+        client_args = dict(
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            metadata=metadata,
+            client_addresses=client_addresses,
+            engine_manager=engine_manager,
+            coordinator=coordinator,
+            client_count=client_count,
+            client_index=client_index,
+        )
+
+        if parallel_config.data_parallel_size > 1 and not parallel_config.data_parallel_external_lb:
+            return DPLBStageEngineCoreClient(**client_args)
+
+        return StageEngineCoreClient(**client_args)
 
     def __init__(
         self,
@@ -42,6 +75,8 @@ class StageEngineCoreClient(AsyncMPClient):
         client_addresses: dict[str, str] | None = None,
         engine_manager: Any = None,
         coordinator: Any = None,
+        client_count: int = 1,
+        client_index: int = 0,
     ):
         """Create an async EngineCore client for a single stage.
 
@@ -65,8 +100,10 @@ class StageEngineCoreClient(AsyncMPClient):
 
         self.engine_outputs: Any = None
 
+        client_name = self.__class__.__name__
         logger.info(
-            "[StageEngineCoreClient] Stage-%s initializing EngineCore",
+            "[%s] Stage-%s initializing EngineCore",
+            client_name,
             self.stage_id,
         )
         try:
@@ -75,6 +112,8 @@ class StageEngineCoreClient(AsyncMPClient):
                 executor_class,
                 log_stats=False,
                 client_addresses=client_addresses,
+                client_count=client_count,
+                client_index=client_index,
             )
             if engine_manager is not None:
                 self.resources.engine_manager = engine_manager
@@ -82,20 +121,23 @@ class StageEngineCoreClient(AsyncMPClient):
                 self.resources.coordinator = coordinator
         except Exception:
             logger.exception(
-                "[StageEngineCoreClient] Stage-%s EngineCore init failed",
+                "[%s] Stage-%s EngineCore init failed",
+                client_name,
                 self.stage_id,
             )
             try:
                 self.shutdown()
             except Exception as shutdown_error:
                 logger.warning(
-                    "[StageEngineCoreClient] Stage-%s cleanup after init failure failed: %s",
+                    "[%s] Stage-%s cleanup after init failure failed: %s",
+                    client_name,
                     self.stage_id,
                     shutdown_error,
                 )
             raise
         logger.info(
-            "[StageEngineCoreClient] Stage-%s EngineCore running",
+            "[%s] Stage-%s EngineCore running",
+            client_name,
             self.stage_id,
         )
 
@@ -103,7 +145,12 @@ class StageEngineCoreClient(AsyncMPClient):
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         """Add request to the stage engine core."""
-        logger.info(f"[StageEngineCoreClient] Stage-{self.stage_id} adding request: {request.request_id}")
+        logger.info(
+            "[%s] Stage-%s adding request: %s",
+            self.__class__.__name__,
+            self.stage_id,
+            request.request_id,
+        )
         await super().add_request_async(request)
 
     # ==================== Stage Methods ====================
@@ -156,9 +203,9 @@ class StageEngineCoreClient(AsyncMPClient):
     ) -> Any:
         """Forward control RPCs to the underlying AsyncMPClient stage engine.
 
-        Each ``StageEngineCoreClient`` already represents one logical stage, so
-        stage-scoped control operations should be executed here and then fanned
-        in-core across the workers managed by this EngineCore client.
+        Each stage client already represents one logical stage, so stage-scoped
+        control operations should be executed here and then fanned in-core
+        across the workers managed by this EngineCore client.
         """
         return await super().collective_rpc_async(
             method=method,
@@ -166,3 +213,11 @@ class StageEngineCoreClient(AsyncMPClient):
             args=args,
             kwargs=kwargs,
         )
+
+
+class StageEngineCoreClient(StageEngineCoreClientBase, AsyncMPClient):
+    """Stage async client backed by vLLM's ``AsyncMPClient``."""
+
+
+class DPLBStageEngineCoreClient(StageEngineCoreClientBase, DPLBAsyncMPClient):
+    """Stage async client backed by vLLM's ``DPLBAsyncMPClient``."""
