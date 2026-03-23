@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 
 from vllm_omni.worker.gpu_model_runner import OmniGPUModelRunner
 
@@ -21,6 +22,7 @@ class DummyInputBatch:
 
     def __init__(self, req_ids):
         self.req_ids = req_ids
+        self.lora_id_to_lora_request = {}
 
 
 class DummyReqState:
@@ -82,12 +84,6 @@ def _make_runner(req_ids=("r1", "r2"), hidden_size=4):
     runner.model = SimpleNamespace(talker_mtp_output_key="code_predictor_codes")
     runner.vllm_config = object()
 
-    # Provide a minimal implementation that returns the expected 4-tuple.
-    def _determine_batch_execution_and_padding(**kwargs):
-        return None, object(), None, None, None
-
-    runner._determine_batch_execution_and_padding = _determine_batch_execution_and_padding
-
     # Use the real merge method from OmniGPUModelRunner.
     return runner
 
@@ -125,11 +121,11 @@ def test_talker_mtp_forward_cpu_updates_inputs_and_info(monkeypatch):
 
     runner = _make_runner(req_ids=("r1", "r2"), hidden_size=4)
 
-    def fake_determine(self, num_tokens, num_reqs, num_scheduled_tokens_np, max_num_scheduled_tokens, use_cascade_attn):
+    def fake_runtime_batch(self, num_tokens):
         batch_desc = SimpleNamespace(num_tokens=int(num_tokens))
-        return (False, batch_desc, None, None, None)
+        return (CUDAGraphMode.NONE, batch_desc)
 
-    monkeypatch.setattr(runner, "_determine_batch_execution_and_padding", fake_determine.__get__(runner, type(runner)))
+    monkeypatch.setattr(runner, "_get_talker_mtp_runtime_batch", fake_runtime_batch.__get__(runner, type(runner)))
 
     # Initialize per-request embeds (batch-major inside talker_mtp_inputs_embeds)
     runner.talker_mtp_inputs_embeds.gpu[0] = torch.tensor([1.0, 2.0, 3.0, 4.0])
@@ -166,6 +162,38 @@ def test_talker_mtp_forward_cpu_empty_batch_noop(monkeypatch):
 
     # Ensure no changes were made
     assert torch.allclose(inputs_embeds, before)
+
+
+def test_talker_mtp_forward_dp_skips_global_padding_sync(monkeypatch):
+    import vllm_omni.worker.gpu_model_runner as mod
+
+    monkeypatch.setattr(mod, "set_forward_context", _noop_forward_context)
+
+    runner = _make_runner(req_ids=("r1",), hidden_size=4)
+    runner._pad_for_sequence_parallelism = lambda num_tokens: num_tokens
+    runner.cudagraph_dispatcher = SimpleNamespace(
+        dispatch=lambda **kwargs: (
+            CUDAGraphMode.NONE,
+            SimpleNamespace(num_tokens=int(kwargs["num_tokens"])),
+        )
+    )
+    runner.compilation_config = SimpleNamespace(
+        pass_config=SimpleNamespace(enable_sp=False),
+    )
+    runner.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+    )
+
+    def fail_global_sync(*args, **kwargs):
+        raise AssertionError("global DP synchronization should not run for talker_mtp")
+
+    runner._determine_batch_execution_and_padding = fail_global_sync
+    runner.talker_mtp_inputs_embeds.gpu[0] = torch.tensor([1.0, 2.0, 3.0, 4.0])
+    inputs_embeds = torch.zeros((2, 4), dtype=torch.float32)
+
+    OmniGPUModelRunner._talker_mtp_forward(runner, ["r1"], inputs_embeds)
+
+    assert torch.allclose(inputs_embeds[0], torch.tensor([2.0, 3.0, 4.0, 5.0]))
 
 
 def test_update_intermediate_buffer_writes_to_buffer_and_setattr(monkeypatch):
