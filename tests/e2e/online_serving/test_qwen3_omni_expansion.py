@@ -71,6 +71,14 @@ test_params = [
     pytest.param(OmniServerParams(model=model, stage_config_path=get_chunk_config(default_path)), id="async_chunk"),
 ]
 
+stage_cli_test_params = [
+    pytest.param(OmniServerParams(model=model, stage_config_path=default_path, use_stage_cli=True), id="default"),
+    pytest.param(
+        OmniServerParams(model=model, stage_config_path=get_chunk_config(default_path), use_stage_cli=True),
+        id="async_chunk",
+    ),
+]
+
 test_token_params = [
     pytest.param(
         OmniServerParams(model=model, stage_config_path=get_batch_token_config(default_path)), id="batch_token_64"
@@ -124,6 +132,33 @@ def test_text_to_audio_001(omni_server, openai_client) -> None:
     Input Setting: stream=True
     Datasets: single request
     """
+    messages = dummy_messages_from_mix_data(system_prompt=get_system_prompt(), content_text=get_prompt())
+
+    request_config = {
+        "model": omni_server.model,
+        "messages": messages,
+        "modalities": ["audio"],
+        "stream": True,
+        "key_words": {"text": ["beijing"]},
+    }
+
+    openai_client.send_omni_request(request_config)
+
+
+@pytest.mark.advanced_model
+@pytest.mark.omni
+@hardware_test(res={"cuda": "H100", "rocm": "MI325"}, num_cards=2)
+@pytest.mark.parametrize("omni_server", stage_cli_test_params, indirect=True)
+def test_text_to_audio_001_stage_cli(omni_server, openai_client) -> None:
+    """
+    Test the stage CLI startup path with text input and audio output.
+    Deploy Setting: stage CLI orchestrator + headless worker stages
+    Input Modal: text
+    Output Modal: audio
+    Input Setting: stream=True
+    Datasets: single request
+    """
+
     messages = dummy_messages_from_mix_data(system_prompt=get_system_prompt(), content_text=get_prompt())
 
     request_config = {
