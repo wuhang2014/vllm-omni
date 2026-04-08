@@ -354,95 +354,93 @@ class AsyncOmniEngine:
         started_stage: StartedLlmStage | None = None
         lock_fds: list[int] = []
         device_control_env = current_omni_platform.device_control_env_var
-        launch_stack = ExitStack()
-
         try:
             proc = None
             handshake_address = None
-            with llm_stage_launch_lock:
-                previous_visible_devices = os.environ.get(device_control_env)
-                try:
-                    setup_stage_devices(metadata.stage_id, metadata.runtime_cfg)
-                    engine_args_dict = build_engine_args_dict(
-                        stage_cfg,
-                        self.model,
-                        stage_connector_spec=stage_connector_spec,
-                    )
-                    omni_conn_cfg, omni_from, omni_to = omni_kv_connector
-                    if omni_conn_cfg:
-                        omni_kv = engine_args_dict.get("omni_kv_config") or {}
-                        if not isinstance(omni_kv, dict):
-                            omni_kv = dict(omni_kv)
-                        omni_kv["connector_config"] = omni_conn_cfg
-                        omni_kv["omni_from_stage"] = omni_from
-                        omni_kv["omni_to_stage"] = omni_to
-                        omni_kv.setdefault("stage_id", metadata.stage_id)
-                        engine_args_dict["omni_kv_config"] = omni_kv
-                    vllm_config, executor_class = build_vllm_config(
-                        stage_cfg,
-                        self.model,
-                        stage_connector_spec=stage_connector_spec,
-                        engine_args_dict=engine_args_dict,
-                    )
-                    lock_fds = acquire_device_locks(
-                        metadata.stage_id,
-                        engine_args_dict,
-                        stage_init_timeout,
-                    )
-                    if self.single_stage_mode and self._omni_master_server is not None:
-                        engine_manager, coordinator, addresses = launch_stack.enter_context(
-                            launch_omni_core_engines(
+            with ExitStack() as launch_stack:
+                with llm_stage_launch_lock:
+                    previous_visible_devices = os.environ.get(device_control_env)
+                    try:
+                        setup_stage_devices(metadata.stage_id, metadata.runtime_cfg)
+                        engine_args_dict = build_engine_args_dict(
+                            stage_cfg,
+                            self.model,
+                            stage_connector_spec=stage_connector_spec,
+                        )
+                        omni_conn_cfg, omni_from, omni_to = omni_kv_connector
+                        if omni_conn_cfg:
+                            omni_kv = engine_args_dict.get("omni_kv_config") or {}
+                            if not isinstance(omni_kv, dict):
+                                omni_kv = dict(omni_kv)
+                            omni_kv["connector_config"] = omni_conn_cfg
+                            omni_kv["omni_from_stage"] = omni_from
+                            omni_kv["omni_to_stage"] = omni_to
+                            omni_kv.setdefault("stage_id", metadata.stage_id)
+                            engine_args_dict["omni_kv_config"] = omni_kv
+                        vllm_config, executor_class = build_vllm_config(
+                            stage_cfg,
+                            self.model,
+                            stage_connector_spec=stage_connector_spec,
+                            engine_args_dict=engine_args_dict,
+                        )
+                        lock_fds = acquire_device_locks(
+                            metadata.stage_id,
+                            engine_args_dict,
+                            stage_init_timeout,
+                        )
+                        if self.single_stage_mode and self._omni_master_server is not None:
+                            engine_manager, coordinator, addresses = launch_stack.enter_context(
+                                launch_omni_core_engines(
+                                    vllm_config=vllm_config,
+                                    executor_class=executor_class,
+                                    log_stats=False,
+                                    omni_master_server=self._omni_master_server,
+                                    stage_id=metadata.stage_id,
+                                    stage_config=stage_cfg,
+                                )
+                            )
+                            started_stage = StartedLlmStage(
+                                stage_id=metadata.stage_id,
+                                metadata=metadata,
+                                vllm_config=vllm_config,
+                                executor_class=executor_class,
+                                addresses=addresses,
+                                engine_manager=engine_manager,
+                                coordinator=coordinator,
+                            )
+                        else:
+                            addresses, proc, handshake_address = spawn_stage_core(
                                 vllm_config=vllm_config,
                                 executor_class=executor_class,
                                 log_stats=False,
-                                omni_master_server=self._omni_master_server,
-                                stage_id=metadata.stage_id,
-                                stage_config=stage_cfg,
                             )
-                        )
-                        started_stage = StartedLlmStage(
-                            stage_id=metadata.stage_id,
-                            metadata=metadata,
-                            vllm_config=vllm_config,
-                            executor_class=executor_class,
-                            addresses=addresses,
-                            engine_manager=engine_manager,
-                            coordinator=coordinator,
-                        )
-                    else:
-                        addresses, proc, handshake_address = spawn_stage_core(
-                            vllm_config=vllm_config,
-                            executor_class=executor_class,
-                            log_stats=False,
-                        )
-                        started_stage = StartedLlmStage(
-                            stage_id=metadata.stage_id,
-                            metadata=metadata,
-                            vllm_config=vllm_config,
-                            executor_class=executor_class,
-                            addresses=addresses,
-                            proc=proc,
-                        )
-                    logger.info("[AsyncOmniEngine] Stage %s engine launch started", metadata.stage_id)
-                    # Keep the stage-specific device visibility until vLLM
-                    # finishes starting all child processes.
-                    if self.single_stage_mode and self._omni_master_server is not None:
-                        launch_stack.close()
-                    else:
-                        assert proc is not None
-                        assert handshake_address is not None
-                        complete_stage_handshake(proc, handshake_address, addresses, vllm_config)
-                    logger.info("[AsyncOmniEngine] Stage %s engine startup completed", metadata.stage_id)
-                finally:
-                    if previous_visible_devices is None:
-                        current_omni_platform.unset_device_control_env_var()
-                    else:
-                        current_omni_platform.set_device_control_env_var(previous_visible_devices)
+                            started_stage = StartedLlmStage(
+                                stage_id=metadata.stage_id,
+                                metadata=metadata,
+                                vllm_config=vllm_config,
+                                executor_class=executor_class,
+                                addresses=addresses,
+                                proc=proc,
+                            )
+                        logger.info("[AsyncOmniEngine] Stage %s engine launch started", metadata.stage_id)
+                        # Keep the stage-specific device visibility until vLLM
+                        # finishes starting all child processes.
+                        if self.single_stage_mode and self._omni_master_server is not None:
+                            launch_stack.close()
+                        else:
+                            assert proc is not None
+                            assert handshake_address is not None
+                            complete_stage_handshake(proc, handshake_address, addresses, vllm_config)
+                        logger.info("[AsyncOmniEngine] Stage %s engine startup completed", metadata.stage_id)
+                    finally:
+                        if previous_visible_devices is None:
+                            current_omni_platform.unset_device_control_env_var()
+                        else:
+                            current_omni_platform.set_device_control_env_var(previous_visible_devices)
 
             assert started_stage is not None
             return started_stage
-        except BaseException as exc:
-            launch_stack.__exit__(type(exc), exc, exc.__traceback__)
+        except Exception:
             if started_stage is not None:
                 close_started_llm_stage(started_stage)
             raise
@@ -515,8 +513,8 @@ class AsyncOmniEngine:
         try:
             od_config = build_diffusion_config(self.model, stage_cfg, metadata)
             handshake_address, request_address, response_address = register_stage_with_omni_master(
-                omni_master_address=omni_master_server._address,
-                omni_master_port=omni_master_server._port,
+                omni_master_address=omni_master_server.address,
+                omni_master_port=omni_master_server.port,
                 omni_stage_id=metadata.stage_id,
                 omni_stage_config=stage_cfg,
                 return_addresses=True,

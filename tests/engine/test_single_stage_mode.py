@@ -78,6 +78,15 @@ def _make_started_llm_stage(stage_id: int) -> StartedLlmStage:
 class TestOmniMasterServerAllocation:
     """Test address pre-allocation in OmniMasterServer.__init__."""
 
+    def test_public_address_and_port_properties_expose_registration_endpoint(self):
+        server = OmniMasterServer(
+            master_address="127.0.0.1",
+            master_port=15000,
+            stage_ids=[0],
+        )
+        assert server.address == "127.0.0.1"
+        assert server.port == 15000
+
     def test_allocations_created_for_each_stage_id(self):
         server = OmniMasterServer(
             master_address="127.0.0.1",
@@ -878,6 +887,79 @@ class TestInitializeStagesRouting:
 
 
 # ---------------------------------------------------------------------------
+# AsyncOmniEngine – _launch_diffusion_stage
+# ---------------------------------------------------------------------------
+
+
+class TestLaunchDiffusionStage:
+    """Test local diffusion stage launch wiring."""
+
+    def test_registers_stage_with_public_master_properties(self):
+        engine = object.__new__(AsyncOmniEngine)
+        engine.model = "fake-model"
+        engine.diffusion_batch_size = 4
+
+        stage_cfg = _make_stage_cfg(5, stage_type="diffusion")
+        metadata = Mock(stage_id=5)
+        omni_master_server = Mock(spec=OmniMasterServer)
+        omni_master_server.address = "127.0.0.1"
+        omni_master_server.port = 25000
+
+        proc = Mock()
+        diffusion_client = Mock()
+
+        with (
+            patch("vllm_omni.engine.async_omni_engine.build_diffusion_config", return_value="diffusion-config"),
+            patch(
+                "vllm_omni.engine.async_omni_engine.register_stage_with_omni_master",
+                return_value=(
+                    "tcp://127.0.0.1:25001",
+                    "tcp://127.0.0.1:25002",
+                    "tcp://127.0.0.1:25003",
+                ),
+            ) as mock_register,
+            patch(
+                "vllm_omni.engine.async_omni_engine.spawn_diffusion_proc",
+                return_value=(proc, None, None, None),
+            ) as mock_spawn,
+            patch("vllm_omni.engine.async_omni_engine.complete_diffusion_handshake") as mock_handshake,
+            patch(
+                "vllm_omni.engine.async_omni_engine.StageDiffusionClient.from_addresses",
+                return_value=diffusion_client,
+            ) as mock_from_addresses,
+        ):
+            result = engine._launch_diffusion_stage(
+                stage_cfg=stage_cfg,
+                metadata=metadata,
+                omni_master_server=omni_master_server,
+            )
+
+        mock_register.assert_called_once_with(
+            omni_master_address="127.0.0.1",
+            omni_master_port=25000,
+            omni_stage_id=5,
+            omni_stage_config=stage_cfg,
+            return_addresses=True,
+        )
+        mock_spawn.assert_called_once_with(
+            "fake-model",
+            "diffusion-config",
+            handshake_address="tcp://127.0.0.1:25001",
+            request_address="tcp://127.0.0.1:25002",
+            response_address="tcp://127.0.0.1:25003",
+        )
+        mock_handshake.assert_called_once_with(proc, "tcp://127.0.0.1:25001")
+        mock_from_addresses.assert_called_once_with(
+            metadata,
+            request_address="tcp://127.0.0.1:25002",
+            response_address="tcp://127.0.0.1:25003",
+            proc=proc,
+            batch_size=4,
+        )
+        assert result is diffusion_client
+
+
+# ---------------------------------------------------------------------------
 # AsyncOmniEngine – _create_remote_llm_stage
 # ---------------------------------------------------------------------------
 
@@ -1159,8 +1241,8 @@ class TestLaunchOmniCoreEngines:
         vllm_config = Mock(parallel_config=parallel_config)
 
         omni_master_server = Mock(spec=OmniMasterServer)
-        omni_master_server._address = "127.0.0.1"
-        omni_master_server._port = 26000
+        omni_master_server.address = "127.0.0.1"
+        omni_master_server.port = 26000
         omni_master_server.get_allocation.return_value = Mock(handshake_bind_address="tcp://127.0.0.1:26001")
 
         stage_config = {"stage_id": 7, "stage_type": "llm"}
@@ -1221,8 +1303,8 @@ class TestLaunchOmniCoreEngines:
         vllm_config.model_config = Mock(is_moe=False)
 
         omni_master_server = Mock(spec=OmniMasterServer)
-        omni_master_server._address = "127.0.0.1"
-        omni_master_server._port = 26000
+        omni_master_server.address = "127.0.0.1"
+        omni_master_server.port = 26000
         omni_master_server.get_zmq_addresses.return_value = EngineZmqAddresses(
             inputs=["tcp://client-in"], outputs=["tcp://client-out"]
         )
@@ -1288,8 +1370,8 @@ class TestLaunchLlmStageSingleStageMode:
         engine._single_stage_id_filter = 0
         engine._llm_stage_launch_lock = threading.Lock()
         mock_oms = Mock(spec=OmniMasterServer)
-        mock_oms._address = "127.0.0.1"
-        mock_oms._port = 25000
+        mock_oms.address = "127.0.0.1"
+        mock_oms.port = 25000
         alloc = Mock()
         alloc.handshake_bind_address = "tcp://127.0.0.1:25001"
         mock_oms.get_allocation.return_value = alloc
@@ -1508,3 +1590,56 @@ class TestLaunchLlmStageSingleStageMode:
 
         mock_close_stage.assert_called_once()
         assert events == ["launch_exit", "stage_close"]
+
+    def test_base_exception_propagates_without_started_stage_cleanup(self):
+        """BaseException subclasses should bypass the Exception cleanup path."""
+        engine = self._build_engine_with_oms()
+        metadata = Mock(stage_id=0, runtime_cfg={})
+
+        fake_addresses = Mock()
+        fake_addresses.inputs = ["tcp://127.0.0.1:5000"]
+        fake_addresses.outputs = ["tcp://127.0.0.1:5001"]
+        fake_addresses.frontend_stats_publish_address = None
+
+        events: list[str] = []
+
+        class FatalLaunchInterrupt(BaseException):
+            pass
+
+        @contextmanager
+        def fake_launch_omni(*args, **kwargs):
+            try:
+                yield Mock(), None, fake_addresses
+            finally:
+                events.append("launch_exit")
+
+        with (
+            patch("vllm_omni.engine.async_omni_engine.setup_stage_devices"),
+            patch(
+                "vllm_omni.engine.async_omni_engine.build_engine_args_dict",
+                return_value={"model": "fake", "stage_id": 0},
+            ),
+            patch("vllm_omni.engine.async_omni_engine.build_vllm_config", return_value=(Mock(), Mock())),
+            patch("vllm_omni.engine.async_omni_engine.acquire_device_locks", return_value=[]),
+            patch("vllm_omni.engine.async_omni_engine.release_device_locks"),
+            patch(
+                "vllm_omni.engine.async_omni_engine.launch_omni_core_engines",
+                return_value=fake_launch_omni(),
+            ),
+            patch(
+                "vllm_omni.engine.async_omni_engine.logger.info",
+                side_effect=FatalLaunchInterrupt("stop"),
+            ),
+            patch("vllm_omni.engine.async_omni_engine.close_started_llm_stage") as mock_close_stage,
+        ):
+            with pytest.raises(FatalLaunchInterrupt, match="stop"):
+                engine._launch_llm_stage(
+                    stage_cfg=_make_stage_cfg(0),
+                    metadata=metadata,
+                    stage_connector_spec={},
+                    stage_init_timeout=60,
+                    llm_stage_launch_lock=threading.Lock(),
+                )
+
+        mock_close_stage.assert_not_called()
+        assert events == ["launch_exit"]

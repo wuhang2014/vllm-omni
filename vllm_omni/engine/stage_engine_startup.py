@@ -142,6 +142,16 @@ class OmniMasterServer:
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
+    @property
+    def address(self) -> str:
+        """Return the registration address exposed to stage launchers."""
+        return self._address
+
+    @property
+    def port(self) -> int:
+        """Return the registration port exposed to stage launchers."""
+        return self._port
+
     def get_allocation(self, stage_id: int) -> StageAllocation:
         """Return the full address allocation for *stage_id*."""
         return self._allocations[stage_id]
@@ -226,8 +236,8 @@ class OmniMasterServer:
         self._thread.start()
         logger.info(
             "[OmniMasterServer] Listening on tcp://%s:%d",
-            self._address,
-            self._port,
+            self.address,
+            self.port,
         )
 
     def stop(self) -> None:
@@ -253,7 +263,7 @@ class OmniMasterServer:
         # Registration socket for the initial stage registration.
         # Per-stage handshake sockets are bound by the launch helpers.
         reg_socket: zmq.Socket = ctx.socket(zmq.ROUTER)  # type: ignore[attr-defined]
-        reg_socket.bind(f"tcp://{self._address}:{self._port}")
+        reg_socket.bind(f"tcp://{self.address}:{self.port}")
 
         poller = zmq.Poller()
         poller.register(reg_socket, zmq.POLLIN)
@@ -546,8 +556,8 @@ def launch_omni_core_engines(
     # Register the stage once and reuse the returned per-stage handshake
     # address for all local engine-core processes.
     handshake_address = register_stage_with_omni_master(
-        omni_master_address=omni_master_server._address,
-        omni_master_port=omni_master_server._port,
+        omni_master_address=omni_master_server.address,
+        omni_master_port=omni_master_server.port,
         omni_stage_id=stage_id,
         omni_stage_config=stage_config,
         coordinator=coordinator,
