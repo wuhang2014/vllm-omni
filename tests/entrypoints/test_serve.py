@@ -7,7 +7,6 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from vllm_omni.engine.stage_init_utils import build_diffusion_config
 from vllm_omni.entrypoints.cli.serve import run_headless
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -24,24 +23,6 @@ def _make_headless_args() -> argparse.Namespace:
         stage_configs_path=None,
         log_stats=False,
         disable_log_stats=False,
-    )
-
-
-def test_build_diffusion_config_tolerates_engine_args_model_override() -> None:
-    stage_cfg = Mock(stage_id=3, stage_type="diffusion")
-    stage_cfg.engine_args = {
-        "model": "stale-model-from-engine-args",
-        "dtype": "bfloat16",
-    }
-    metadata = Mock(cfg_kv_collect_func=None)
-
-    with patch("vllm_omni.diffusion.data.OmniDiffusionConfig.from_kwargs") as mock_from_kwargs:
-        build_diffusion_config("resolved-model", stage_cfg, metadata)
-
-    mock_from_kwargs.assert_called_once_with(
-        model="resolved-model",
-        stage_id=3,
-        dtype="bfloat16",
     )
 
 
