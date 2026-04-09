@@ -144,9 +144,12 @@ def _convert_dataclasses_to_dict(obj: Any) -> Any:
     # Handle set objects (convert to list)
     if isinstance(obj, set):
         return list(obj)
-    # Handle dataclass objects.
-    # Iterate fields directly so we only keep init=True fields and can omit
-    # explicit None values that match a None default.
+    # Handle dataclass objects
+    # Use field iteration instead of asdict() to:
+    # 1. Only include init fields (non-init fields cause "unexpected kwarg" errors)
+    # 2. Skip None values matching field defaults (avoids Pydantic validation
+    #    failures when None is explicitly passed for non-Optional typed fields,
+    #    e.g. CompilationConfig.cudagraph_capture_sizes: list[int] = None)
     if is_dataclass(obj) and not isinstance(obj, type):
         result = {}
         for f in fields(obj):
@@ -325,22 +328,26 @@ def load_stage_configs_from_yaml(
     """
     if base_engine_args is None:
         base_engine_args = {}
-    config_data = _to_dict(load_yaml_config(config_path))
+    config_data = load_yaml_config(config_path)
     stage_args = config_data["stage_args"]
     global_async_chunk = config_data.get("async_chunk", False)
-    # Convert any nested dataclass objects to dicts before merging
+    # Convert any nested dataclass objects to dicts before creating DictConfig
     base_engine_args = _convert_dataclasses_to_dict(base_engine_args)
+    base_engine_args = create_config(base_engine_args)
     for stage_arg in stage_args:
         base_engine_args_tmp = base_engine_args.copy()
         # Update base_engine_args with stage-specific engine_args if they exist
-        if stage_arg.get("engine_args") is not None:
-            stage_engine_args = _convert_dataclasses_to_dict(_to_dict(stage_arg["engine_args"]))
+        stage_engine_args = stage_arg.get("engine_args") if hasattr(stage_arg, "get") else None
+        if stage_engine_args is not None:
+            normalized_stage_engine_args = _convert_dataclasses_to_dict(_to_dict(stage_engine_args))
             if prefer_stage_engine_args:
-                base_engine_args_tmp = merge_configs(base_engine_args_tmp, stage_engine_args)
+                base_engine_args_tmp = create_config(merge_configs(base_engine_args_tmp, normalized_stage_engine_args))
             else:
-                base_engine_args_tmp = merge_configs(stage_engine_args, base_engine_args_tmp)
-        stage_type = stage_arg.get("stage_type", "llm")
-        if stage_arg.get("runtime") is not None and stage_type != "diffusion":
+                base_engine_args_tmp = create_config(merge_configs(normalized_stage_engine_args, base_engine_args_tmp))
+
+        stage_type = stage_arg.get("stage_type", "llm") if hasattr(stage_arg, "get") else "llm"
+        runtime_cfg = stage_arg.get("runtime") if hasattr(stage_arg, "get") else None
+        if runtime_cfg is not None and stage_type != "diffusion":
             base_engine_args_tmp["async_chunk"] = global_async_chunk
         stage_arg["engine_args"] = base_engine_args_tmp
     return create_config(stage_args)
