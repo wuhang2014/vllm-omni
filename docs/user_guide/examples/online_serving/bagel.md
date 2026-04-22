@@ -30,6 +30,8 @@ bash run_server_stage_cli.sh --stage 0
 bash run_server_stage_cli.sh --stage 1
 ```
 
+If you have a custom stage configs file, launch the server with the command below:
+
 ```bash
 vllm serve ByteDance-Seed/BAGEL-7B-MoT --omni --port 8091 --stage-configs-path /path/to/stage_configs_file
 ```

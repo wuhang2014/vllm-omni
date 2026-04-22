@@ -83,11 +83,6 @@ vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni \
     --omni-master-port 26000
 ```
 
-> **Startup order:** launch stage 0 first, then the headless worker stages.
-> Stage 0 may appear to wait during startup until the required worker stages
-> connect to the same `--omni-master-address` / `--omni-master-port`
-> endpoint.
-
 ### Send Multi-modal Request
 
 Get into the example folder
