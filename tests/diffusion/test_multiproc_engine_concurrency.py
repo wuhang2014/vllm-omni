@@ -78,6 +78,8 @@ def _make_engine(num_gpus: int = 1):
     engine.scheduler = sched
     engine.executor = executor
     engine._rpc_lock = threading.RLock()
+    engine._cv = threading.Condition(engine._rpc_lock)
+    engine._closed = False
     engine.abort_queue = queue.Queue()
     engine.execute_fn = executor.execute_request
     return engine, executor, req_q, res_q

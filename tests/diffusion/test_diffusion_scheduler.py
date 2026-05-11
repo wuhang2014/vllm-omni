@@ -324,6 +324,8 @@ class TestDiffusionEngine:
         engine.scheduler = RequestScheduler()
         engine.scheduler.initialize(SimpleNamespace())
         engine._rpc_lock = threading.RLock()
+        engine._cv = threading.Condition(engine._rpc_lock)
+        engine._closed = False
         engine.abort_queue = queue.Queue()
 
         request = _make_request("engine")
@@ -343,6 +345,8 @@ class TestDiffusionEngine:
         engine = DiffusionEngine.__new__(DiffusionEngine)
         engine.scheduler = scheduler
         engine._rpc_lock = threading.RLock()
+        engine._cv = threading.Condition(engine._rpc_lock)
+        engine._closed = False
         engine.abort_queue = queue.Queue()
         engine.execute_fn = mocker.Mock(return_value=runner_output)
 
@@ -394,7 +398,8 @@ class TestDiffusionEngine:
     @pytest.mark.asyncio
     async def test_step_raises_aborted_error(self, mocker: MockerFixture) -> None:
         engine = DiffusionEngine.__new__(DiffusionEngine)
-        engine._loop_started = False
+        engine._closed = False
+        engine._loop_started = True
         engine._init_lock = asyncio.Lock()
         engine.main_loop = asyncio.get_running_loop()
         engine.stop_event = threading.Event()
@@ -410,6 +415,7 @@ class TestDiffusionEngine:
         engine = DiffusionEngine.__new__(DiffusionEngine)
         engine._rpc_lock = threading.RLock()
         engine._cv = threading.Condition(engine._rpc_lock)
+        engine._closed = False
         engine.scheduler = RequestScheduler()
         engine.scheduler.initialize(SimpleNamespace())
         engine.abort_queue = queue.Queue()

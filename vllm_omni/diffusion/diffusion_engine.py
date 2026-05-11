@@ -106,11 +106,13 @@ class DiffusionEngine:
             logger.warning(f"Non-stepwise-execution does not support max-num-seqs={max_num_seqs}, set it to 1.")
         self.main_loop: asyncio.AbstractEventLoop | None = None
         self.stop_event: threading.Event | None = None
+        self.worker_thread: threading.Thread | None = None
         self._loop_started = False
         self._init_lock = asyncio.Lock()
         self._rpc_lock = threading.RLock()
         self._cv = threading.Condition(self._rpc_lock)
         self._out_queue: dict[str, asyncio.Future] = {}
+        self._closed = False
         self.abort_queue: queue.Queue[str] = queue.Queue()
         self.execute_fn = self.executor.execute_step if self.step_execution else self.executor.execute_request
 
@@ -122,11 +124,15 @@ class DiffusionEngine:
             raise e
 
     async def _check_and_start_background_loop(self):
+        if self._closed:
+            raise RuntimeError("DiffusionEngine is closed.")
         if self._loop_started:
             return
 
         async with self._init_lock:
             # double check, in case of lock queue issue
+            if self._closed:
+                raise RuntimeError("DiffusionEngine is closed.")
             if self._loop_started:
                 return
 
@@ -436,8 +442,10 @@ class DiffusionEngine:
         return DiffusionEngine(config, scheduler=scheduler)
 
     def add_request(self, request: OmniDiffusionRequest) -> str:
-        fut = self.main_loop.create_future()
         with self._cv:
+            if self._closed:
+                raise RuntimeError("DiffusionEngine is closed.")
+            fut = self.main_loop.create_future()
             sched_req_id = self.scheduler.add_request(request)
             self._out_queue[sched_req_id] = fut
             self._cv.notify_all()
@@ -461,6 +469,8 @@ class DiffusionEngine:
 
     def add_req_and_wait_for_response(self, request: OmniDiffusionRequest) -> DiffusionOutput:
         with self._rpc_lock:
+            if self._closed:
+                raise RuntimeError("DiffusionEngine is closed.")
             target_sched_req_id = self.scheduler.add_request(request)
 
             # keep scheduling and executing until the target request is finished
@@ -618,31 +628,74 @@ class DiffusionEngine:
             if acquired:
                 self._rpc_lock.release()
 
+    def _complete_future(self, fut: asyncio.Future, output: DiffusionOutput) -> None:
+        if fut.done():
+            return
+
+        def _set_result() -> None:
+            if not fut.done():
+                fut.set_result(output)
+
+        try:
+            loop = fut.get_loop()
+        except AttributeError:
+            loop = self.main_loop
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if loop is not None and loop.is_running() and loop is not running_loop:
+            loop.call_soon_threadsafe(_set_result)
+        else:
+            _set_result()
+
     def close(self) -> None:
-        if hasattr(self, "scheduler"):
-            self.scheduler.close()
-        if hasattr(self, "stop_event") and self.stop_event is not None:
-            with self._cv:
+        pending_futures: list[asyncio.Future] = []
+        with self._cv:
+            if self._closed:
+                return
+            self._closed = True
+            if self.stop_event is not None:
                 self.stop_event.set()
-                self._cv.notify_all()
-        if hasattr(self, "worker_thread") and self.worker_thread.is_alive():
-            self.worker_thread.join(timeout=10)
-            if self.worker_thread.is_alive():
+            pending_futures = list(self._out_queue.values())
+            self._out_queue.clear()
+            self._cv.notify_all()
+
+        closed_output = DiffusionOutput(error="DiffusionEngine is closed.")
+        for fut in pending_futures:
+            self._complete_future(fut, closed_output)
+
+        worker_thread = self.worker_thread
+        if worker_thread is not None:
+            if worker_thread.is_alive():
+                worker_thread.join(timeout=10)
+            if worker_thread.is_alive():
                 logger.warning("Worker thread did not terminate within 10s, resources may not be released.")
             else:
                 self._loop_started = False
-        if hasattr(self, "executor"):
-            self.executor.shutdown()
+        else:
+            self._loop_started = False
+
+        self.scheduler.close()
+        self.executor.shutdown()
 
     def abort(self, request_id: str | Iterable[str]) -> None:
         request_ids = [request_id] if isinstance(request_id, str) else list(request_id)
 
         with self._cv:
+            if self._closed:
+                return
             for req_id in request_ids:
                 self.abort_queue.put(req_id)
             self._cv.notify_all()
 
     def _process_aborts_queue(self) -> None:
+        with self._cv:
+            self._drain_abort_queue()
+
+    def _drain_abort_queue(self) -> None:
         if self.abort_queue.empty():
             return
 

@@ -72,6 +72,8 @@ class _BaseScheduler(SchedulerInterface):
         state = self._make_request_state(sched_req_id, request)
         self._request_states[sched_req_id] = state
         self._register_request_ids(request.request_ids, sched_req_id)
+        if request_id := getattr(request, "request_id", None):
+            self._register_request_ids([request_id], sched_req_id)
         self._waiting.append(sched_req_id)
         logger.debug("%s add_request: %s (waiting=%d)", self.__class__.__name__, sched_req_id, len(self._waiting))
         return sched_req_id
@@ -135,6 +137,8 @@ class _BaseScheduler(SchedulerInterface):
         state = self._request_states.pop(sched_req_id, None)
         if state is not None:
             self._unregister_request_ids(state.req.request_ids, sched_req_id)
+            if request_id := getattr(state.req, "request_id", None):
+                self._unregister_request_ids([request_id], sched_req_id)
         return state
 
     def preempt_request(self, sched_req_id: str) -> bool:
