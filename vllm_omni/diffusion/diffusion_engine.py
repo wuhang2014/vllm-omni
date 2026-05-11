@@ -113,6 +113,7 @@ class DiffusionEngine:
         self._cv = threading.Condition(self._rpc_lock)
         self._out_queue: dict[str, asyncio.Future] = {}
         self._closed = False
+        self._shutdown_complete = False
         self.abort_queue: queue.Queue[str] = queue.Queue()
         self.execute_fn = self.executor.execute_step if self.step_execution else self.executor.execute_request
 
@@ -416,15 +417,16 @@ class DiffusionEngine:
         missing_result_error: str = "Diffusion execution finished without a final output",
     ):
         for rid in finished_ids:
-            if rid in self._out_queue:
-                fut = self._out_queue.pop(rid)
-                if runner_output is not None:
-                    _output = runner_output.get_req_output(rid)
-                else:
-                    _output = None
-                out = self._finalize_finished_request(rid, _output, missing_result_error)
-                if not fut.done():
-                    self.main_loop.call_soon_threadsafe(fut.set_result, out)
+            with self._cv:
+                fut = self._out_queue.pop(rid, None)
+            if fut is None:
+                continue
+            if runner_output is not None:
+                _output = runner_output.get_req_output(rid)
+            else:
+                _output = None
+            out = self._finalize_finished_request(rid, _output, missing_result_error)
+            self._complete_future(fut, out)
 
     @staticmethod
     def make_engine(
@@ -654,14 +656,15 @@ class DiffusionEngine:
     def close(self) -> None:
         pending_futures: list[asyncio.Future] = []
         with self._cv:
-            if self._closed:
+            if self._closed and self._shutdown_complete:
                 return
-            self._closed = True
-            if self.stop_event is not None:
-                self.stop_event.set()
-            pending_futures = list(self._out_queue.values())
-            self._out_queue.clear()
-            self._cv.notify_all()
+            if not self._closed:
+                self._closed = True
+                if self.stop_event is not None:
+                    self.stop_event.set()
+                pending_futures = list(self._out_queue.values())
+                self._out_queue.clear()
+                self._cv.notify_all()
 
         closed_output = DiffusionOutput(error="DiffusionEngine is closed.")
         for fut in pending_futures:
@@ -672,7 +675,10 @@ class DiffusionEngine:
             if worker_thread.is_alive():
                 worker_thread.join(timeout=10)
             if worker_thread.is_alive():
-                logger.warning("Worker thread did not terminate within 10s, resources may not be released.")
+                logger.warning(
+                    "Worker thread did not terminate within 10s; scheduler and executor shutdown will be skipped."
+                )
+                return
             else:
                 self._loop_started = False
         else:
@@ -680,6 +686,7 @@ class DiffusionEngine:
 
         self.scheduler.close()
         self.executor.shutdown()
+        self._shutdown_complete = True
 
     def abort(self, request_id: str | Iterable[str]) -> None:
         request_ids = [request_id] if isinstance(request_id, str) else list(request_id)
