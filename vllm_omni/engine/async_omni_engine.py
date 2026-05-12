@@ -21,7 +21,7 @@ import weakref
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import janus
 import torch
@@ -36,6 +36,7 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm_omni.config.stage_config import strip_parent_engine_args
 from vllm_omni.diffusion.data import DiffusionParallelConfig, parse_attention_config
 from vllm_omni.diffusion.diffusion_engine import supports_audio_output
+from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
 from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
 from vllm_omni.diffusion.stage_diffusion_proc import (
     complete_diffusion_handshake,
@@ -97,6 +98,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _STARTUP_POLL_INTERVAL_S = 1.0
+
+StageReplicaClient: TypeAlias = StageEngineCoreClientBase | StageDiffusionClient | InlineStageDiffusionClient
 
 
 # ============================================================================
@@ -295,7 +298,7 @@ class AsyncOmniEngine:
         stage0_args = getattr(self.stage_configs[0], "engine_args", None) if self.num_stages > 0 else None
         self.async_chunk = bool(getattr(stage0_args, "async_chunk", False))
         self.stage_pools: list[StagePool] = []
-        self.stage_clients: list[Any] = []  # logical-stage view for external readers
+        self.stage_clients: list[StageReplicaClient] = []  # logical-stage view for external readers
         self.input_processor: InputProcessor | None = None
         self.supported_tasks: tuple[str, ...] = ("generate",)
         self.default_sampling_params_list: list[Any] = []
@@ -379,15 +382,15 @@ class AsyncOmniEngine:
 
     @staticmethod
     def _collect_initialized_clients_for_cleanup(
-        stage_pools: Sequence[Any],
-        initialized_clients_by_stage: Mapping[int, Sequence[Any | None]],
-    ) -> list[Any]:
+        stage_pools: Sequence[StagePool],
+        initialized_clients_by_stage: Mapping[int, Sequence[StageReplicaClient | None]],
+    ) -> list[StageReplicaClient]:
         """Collect initialized clients exactly once for failure cleanup."""
 
-        collected: list[Any] = []
+        collected: list[StageReplicaClient] = []
         seen: set[int] = set()
 
-        def _add_client(client: Any) -> None:
+        def _add_client(client: StageReplicaClient | None) -> None:
             if client is None:
                 return
             client_id = id(client)
@@ -407,7 +410,7 @@ class AsyncOmniEngine:
         return collected
 
     @staticmethod
-    def _shutdown_initialized_clients(clients: Sequence[Any]) -> None:
+    def _shutdown_initialized_clients(clients: Sequence[StageReplicaClient]) -> None:
         """Best-effort shutdown for attached clients after init failure."""
 
         for client in reversed(list(clients)):
@@ -585,7 +588,7 @@ class AsyncOmniEngine:
         plan: ReplicaInitPlan,
         stage_init_timeout: int,
         llm_stage_launch_lock: threading.Lock,
-    ) -> Any:
+    ) -> StageEngineCoreClientBase:
         """Initialize one LLM replica end-to-end."""
 
         proc = None
@@ -748,7 +751,7 @@ class AsyncOmniEngine:
         plan: ReplicaInitPlan,
         stage_init_timeout: int,
         stage_launch_lock: threading.Lock,
-    ) -> Any:
+    ) -> StageDiffusionClient | InlineStageDiffusionClient:
         """Initialize one diffusion replica end-to-end."""
 
         client = None
@@ -865,7 +868,7 @@ class AsyncOmniEngine:
         plan: ReplicaInitPlan,
         stage_init_timeout: int,
         stage_launch_lock: threading.Lock,
-    ) -> Any:
+    ) -> StageEngineCoreClientBase | StageDiffusionClient | InlineStageDiffusionClient:
         """Initialize one replica, regardless of backend type."""
 
         if plan.metadata.stage_type == "diffusion":
@@ -876,11 +879,11 @@ class AsyncOmniEngine:
         self,
         stage_plans: Sequence[LogicalStageInitPlan],
         stage_init_timeout: int,
-    ) -> dict[int, list[Any | None]]:
+    ) -> dict[int, list[StageReplicaClient | None]]:
         """Initialize all stage replicas in parallel."""
 
         stage_launch_lock = threading.Lock()
-        initialized_clients_by_stage: dict[int, list[Any | None]] = {
+        initialized_clients_by_stage: dict[int, list[StageReplicaClient | None]] = {
             plan.stage_idx: [None] * len(plan.replicas) for plan in stage_plans
         }
         total_replicas = sum(len(plan.replicas) for plan in stage_plans)
@@ -924,7 +927,7 @@ class AsyncOmniEngine:
     def _assemble_stage_pools(
         self,
         stage_plans: Sequence[LogicalStageInitPlan],
-        initialized_clients_by_stage: Mapping[int, Sequence[Any | None]],
+        initialized_clients_by_stage: Mapping[int, Sequence[StageReplicaClient | None]],
     ) -> list[StagePool]:
         """Assemble logical stage pools and update top-level stage metadata."""
 
@@ -938,7 +941,7 @@ class AsyncOmniEngine:
             if first_client is None:
                 raise RuntimeError(f"Stage {plan.stage_idx} initialization completed with a missing client")
 
-            clients = [client for client in replica_clients if client is not None]
+            clients: list[StageReplicaClient] = [client for client in replica_clients if client is not None]
             stage_vllm_config = None
             output_processor = None
             if plan.replicas[0].metadata.stage_type != "diffusion":
@@ -998,7 +1001,7 @@ class AsyncOmniEngine:
 
         stage_pools: list[StagePool] = []
         input_processor: InputProcessor | None = None
-        initialized_clients_by_stage: dict[int, list[Any | None]] = {
+        initialized_clients_by_stage: dict[int, list[StageReplicaClient | None]] = {
             plan.stage_idx: [None] * len(plan.replicas) for plan in stage_plans
         }
 

@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import time as _time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 from vllm.logger import init_logger
 from vllm.v1.engine import EngineCoreOutputs
 
+from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
+from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
+from vllm_omni.engine.stage_engine_core_client import StageEngineCoreClientBase
 from vllm_omni.metrics.stats import StageRequestStats as StageRequestMetrics
 from vllm_omni.metrics.stats import StageStats
 from vllm_omni.metrics.utils import count_tokens_from_outputs
@@ -18,6 +21,8 @@ if TYPE_CHECKING:
     from vllm_omni.engine.orchestrator import OrchestratorRequestState
 
 logger = init_logger(__name__)
+
+StagePoolClient: TypeAlias = StageEngineCoreClientBase | StageDiffusionClient | InlineStageDiffusionClient
 
 
 @dataclass
@@ -35,20 +40,20 @@ class StagePool:
     def __init__(
         self,
         stage_id: int,
-        clients: Any | list[Any],
+        clients: StagePoolClient | list[StagePoolClient],
         *,
         output_processor: Any = None,
         stage_vllm_config: Any = None,
     ) -> None:
         if isinstance(clients, list):
-            normalized_clients = list(clients)
+            normalized_clients: list[StagePoolClient] = list(clients)
         else:
             normalized_clients = [clients]
 
         if not normalized_clients:
             raise ValueError(f"StagePool for stage {stage_id} has no replicas")
         self.stage_id = stage_id
-        self.clients: list[Any] = normalized_clients
+        self.clients: list[StagePoolClient] = normalized_clients
         self._output_processor = output_processor
         self._stage_vllm_config = stage_vllm_config
         self._next_replica_id = 0
@@ -70,7 +75,7 @@ class StagePool:
         return bool(getattr(self.clients[0], "final_output", False))
 
     @property
-    def stage_client(self) -> Any:
+    def stage_client(self) -> StagePoolClient:
         return self.clients[0]
 
     @property
@@ -87,7 +92,7 @@ class StagePool:
         """Return the currently bound replica id for *request_id* if present."""
         return self._request_bindings.get(request_id)
 
-    def get_bound_client(self, request_id: str) -> Any | None:
+    def get_bound_client(self, request_id: str) -> StagePoolClient | None:
         """Return the currently bound client for *request_id* if present."""
         replica_id = self.get_bound_replica_id(request_id)
         if replica_id is None:
