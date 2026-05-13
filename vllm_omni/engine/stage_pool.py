@@ -5,14 +5,16 @@ from __future__ import annotations
 import asyncio
 import time as _time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, cast
 
 from vllm.logger import init_logger
 from vllm.v1.engine import EngineCoreOutputs
 
-from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
-from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
-from vllm_omni.engine.stage_engine_core_client import StageEngineCoreClientBase
+from vllm_omni.engine.stage_client import (
+    StagePoolClient,
+    StagePoolDiffusionClient,
+    StagePoolLLMClient,
+)
 from vllm_omni.metrics.stats import StageRequestStats as StageRequestMetrics
 from vllm_omni.metrics.stats import StageStats
 from vllm_omni.metrics.utils import count_tokens_from_outputs
@@ -21,8 +23,6 @@ if TYPE_CHECKING:
     from vllm_omni.engine.orchestrator import OrchestratorRequestState
 
 logger = init_logger(__name__)
-
-StagePoolClient: TypeAlias = StageEngineCoreClientBase | StageDiffusionClient | InlineStageDiffusionClient
 
 
 @dataclass
@@ -68,15 +68,19 @@ class StagePool:
 
     @property
     def stage_type(self) -> str | None:
-        return getattr(self.stage_client, "stage_type", None)
+        return self.stage_client.stage_type
 
     @property
     def final_output(self) -> bool:
-        return bool(getattr(self.clients[0], "final_output", False))
+        return self.clients[0].final_output
 
     @property
     def stage_client(self) -> StagePoolClient:
         return self.clients[0]
+
+    @property
+    def llm_stage_client(self) -> StagePoolLLMClient:
+        return cast(StagePoolLLMClient, self.stage_client)
 
     @property
     def stage_vllm_config(self) -> Any:
@@ -98,6 +102,13 @@ class StagePool:
         if replica_id is None:
             return None
         return self.clients[replica_id]
+
+    def get_bound_llm_client(self, request_id: str) -> StagePoolLLMClient | None:
+        """Return the currently bound LLM client for *request_id* if present."""
+        client = self.get_bound_client(request_id)
+        if client is None:
+            return None
+        return cast(StagePoolLLMClient, client)
 
     def release_binding(self, request_id: str) -> None:
         """Drop the route binding for *request_id* in this stage."""
@@ -129,6 +140,12 @@ class StagePool:
 
         self._request_bindings[request_id] = chosen
         return chosen
+
+    def _llm_client(self, replica_id: int) -> StagePoolLLMClient:
+        return cast(StagePoolLLMClient, self.clients[replica_id])
+
+    def _diffusion_client(self, replica_id: int) -> StagePoolDiffusionClient:
+        return cast(StagePoolDiffusionClient, self.clients[replica_id])
 
     # ---- Metrics ----
 
@@ -193,7 +210,7 @@ class StagePool:
                 request_id,
                 affinity_request_id=affinity_request_id,
             )
-            client = self.clients[replica_id]
+            client = self._diffusion_client(replica_id)
             if isinstance(request, list):
                 await client.add_batch_request_async(request_id, request, params, **submit_kwargs)
             else:
@@ -217,7 +234,7 @@ class StagePool:
             raise
 
         try:
-            await self.clients[replica_id].add_request_async(request, **submit_kwargs)
+            await self._llm_client(replica_id).add_request_async(request, **submit_kwargs)
         except Exception:
             self.release_binding(request_id)
             rollback = getattr(self.output_processor, "remove_request", None)
@@ -249,7 +266,7 @@ class StagePool:
             replica_id = self.select_replica_id(request_id)
 
         if self.stage_type == "diffusion":
-            await self.clients[replica_id].add_request_async(request_id, request, params)
+            await self._diffusion_client(replica_id).add_request_async(request_id, request, params)
         else:
             # Refresh the shared output-processor state before yielding to the
             # stage client so streaming segments are merged against the latest
@@ -261,12 +278,12 @@ class StagePool:
                 request_index=0,
                 queue=None,
             )
-            await self.clients[replica_id].add_request_async(request)
+            await self._llm_client(replica_id).add_request_async(request)
         return replica_id
 
     # ---- Stage-local polling ----
 
-    async def _poll_stage_raw(self, client: Any) -> EngineCoreOutputs | None:
+    async def _poll_stage_raw(self, client: StagePoolLLMClient) -> EngineCoreOutputs | None:
         """Pull raw EngineCoreOutputs from a stage replica without processing."""
         outputs = await client.get_output_async()
         if not outputs.outputs:
@@ -279,7 +296,7 @@ class StagePool:
         raw_outputs: EngineCoreOutputs,
     ) -> list[Any]:
         """Run the shared LLM output processor on one raw poll result."""
-        client = self.clients[replica_id]
+        client = self._llm_client(replica_id)
         processor = self.output_processor
         processed = processor.process_outputs(
             raw_outputs.outputs,
@@ -302,7 +319,7 @@ class StagePool:
         timeout_s: float = 0.001,
     ) -> EngineCoreOutputs | None:
         """Poll raw EngineCore outputs from one LLM replica once."""
-        client = self.clients[replica_id]
+        client = self._llm_client(replica_id)
         try:
             return await asyncio.wait_for(
                 self._poll_stage_raw(client),
@@ -322,7 +339,7 @@ class StagePool:
 
     def poll_diffusion_output(self, replica_id: int) -> Any | None:
         """Drain one ready diffusion output from the given replica if present."""
-        return self.clients[replica_id].get_diffusion_output_nowait()
+        return self._diffusion_client(replica_id).get_diffusion_output_nowait()
 
     # ---- Stage-local control plane ----
 
@@ -365,18 +382,12 @@ class StagePool:
         kwargs = dict(kwargs or {})
         client = self.clients[replica_id]
         try:
-            if hasattr(client, "collective_rpc_async"):
-                return await client.collective_rpc_async(
-                    method=method,
-                    timeout=timeout,
-                    args=args,
-                    kwargs=kwargs,
-                )
-            return {
-                "supported": False,
-                "todo": True,
-                "reason": f"{client.__class__.__name__}.collective_rpc_async is not implemented yet",
-            }
+            return await client.collective_rpc_async(
+                method=method,
+                timeout=timeout,
+                args=args,
+                kwargs=kwargs,
+            )
         except Exception as exc:
             logger.exception(
                 "[StagePool] collective_rpc failed: stage=%s replica=%s method=%s",
