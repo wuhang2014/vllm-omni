@@ -57,7 +57,7 @@ from vllm_omni.engine.messages import (
     StageSubmissionMessage,
 )
 from vllm_omni.engine.orchestrator import Orchestrator
-from vllm_omni.engine.output_modality import OutputModalityType
+from vllm_omni.engine.output_modality import FinalOutputModalityType
 from vllm_omni.engine.serialization import (
     deserialize_additional_information,
     serialize_additional_information,
@@ -116,7 +116,7 @@ _STARTUP_POLL_INTERVAL_S = 1.0
 @dataclass(frozen=True, slots=True)
 class StageRuntimeInfo:
     final_output: bool
-    final_output_type: OutputModalityType | None
+    final_output_type: FinalOutputModalityType | None
     stage_type: str
 
 

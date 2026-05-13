@@ -11,7 +11,7 @@ import re
 from enum import Enum, Flag, StrEnum, auto
 from typing import Literal, TypeAlias
 
-OutputModalityType: TypeAlias = Literal["text", "image", "audio", "latent"]
+FinalOutputModalityType: TypeAlias = Literal["text", "image", "audio", "video"]
 
 _MODALITY_ALIASES: dict[str, str] = {
     "speech": "audio",
