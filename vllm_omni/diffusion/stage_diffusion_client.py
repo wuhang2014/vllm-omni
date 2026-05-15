@@ -20,6 +20,7 @@ import zmq
 from vllm.logger import init_logger
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from vllm_omni.diffusion.stage_diffusion_client_base import StageDiffusionClientBase
 from vllm_omni.diffusion.stage_diffusion_proc import (
     StageDiffusionProc,
     complete_diffusion_handshake,
@@ -29,7 +30,6 @@ from vllm_omni.distributed.omni_connectors.utils.serialization import (
     OmniMsgpackDecoder,
     OmniMsgpackEncoder,
 )
-from vllm_omni.engine.stage_client import StageClientBase
 from vllm_omni.engine.stage_init_utils import StageMetadata, terminate_alive_proc
 from vllm_omni.outputs import OmniRequestOutput
 
@@ -47,7 +47,7 @@ def create_diffusion_client(
     stage_init_timeout: int,
     batch_size: int = 1,
     use_inline: bool = False,
-) -> Any:
+) -> StageDiffusionClientBase:
     """Factory to create either an inline or out-of-process diffusion client."""
     if use_inline:
         from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
@@ -58,7 +58,7 @@ def create_diffusion_client(
     )
 
 
-class StageDiffusionClient(StageClientBase):
+class StageDiffusionClient(StageDiffusionClientBase):
     """Communicates with StageDiffusionProc via ZMQ for use inside the Orchestrator.
 
     Exposes the same attributes and async methods the Orchestrator
@@ -66,10 +66,6 @@ class StageDiffusionClient(StageClientBase):
     a StageDiffusionProc subprocess instead of running the diffusion
     engine in-process.
     """
-
-    stage_type: str = "diffusion"
-    replica_id: int = 0
-    is_comprehension: bool = False
 
     def __init__(
         self,
@@ -114,14 +110,7 @@ class StageDiffusionClient(StageClientBase):
         proc: Any,
         batch_size: int,
     ) -> None:
-        self.stage_id = metadata.stage_id
-        self.replica_id = metadata.replica_id
-        self.final_output = metadata.final_output
-        self.final_output_type = metadata.final_output_type
-        self.default_sampling_params = metadata.default_sampling_params
-        self.requires_multimodal_data = getattr(metadata, "requires_multimodal_data", False)
-        self.custom_process_input_func = getattr(metadata, "custom_process_input_func", None)
-        self.engine_input_source = getattr(metadata, "engine_input_source", [])
+        self._initialize_stage_client(metadata, batch_size=batch_size)
         self._proc = proc
         self._owns_process = proc is not None
 
@@ -134,12 +123,8 @@ class StageDiffusionClient(StageClientBase):
         self._encoder = OmniMsgpackEncoder()
         self._decoder = OmniMsgpackDecoder()
 
-        self._output_queue: asyncio.Queue[OmniRequestOutput] = asyncio.Queue()
         self._rpc_results: dict[str, Any] = {}
         self._pending_rpcs: set[str] = set()
-        self._tasks: dict[str, asyncio.Task] = {}
-        self._shutting_down = False
-        self._engine_dead: bool = False
 
         # Background thread to detect silent process death (SIGKILL, segfault)
         # where the subprocess cannot send the ZMQ death sentinel.
@@ -431,19 +416,7 @@ class StageDiffusionClient(StageClientBase):
         if self._engine_dead:
             raise EngineDeadError()
 
-        # Inject a default profile_prefix that includes stage_id when profiling.
-        if method == "profile":
-            args_list = list(args)
-            is_start = args_list[0] if args_list else True
-            profile_prefix = args_list[1] if len(args_list) > 1 else None
-            if is_start and profile_prefix is None:
-                profile_prefix = f"stage_{self.stage_id}_rep_{self.replica_id}_diffusion_{int(time.time())}"
-                if len(args_list) > 1:
-                    args_list[1] = profile_prefix
-                else:
-                    args_list.append(profile_prefix)
-                args = tuple(args_list)
-
+        args = self._normalize_profile_rpc_args(method, args)
         kwargs = kwargs or {}
         rpc_id = uuid.uuid4().hex
         self._pending_rpcs.add(rpc_id)

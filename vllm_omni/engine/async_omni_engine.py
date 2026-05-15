@@ -36,8 +36,8 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm_omni.config.stage_config import strip_parent_engine_args
 from vllm_omni.diffusion.data import DiffusionParallelConfig, parse_attention_config
 from vllm_omni.diffusion.diffusion_engine import supports_audio_output
-from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
 from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
+from vllm_omni.diffusion.stage_diffusion_client_base import StageDiffusionClientBase
 from vllm_omni.diffusion.stage_diffusion_proc import (
     complete_diffusion_handshake,
     spawn_diffusion_proc,
@@ -769,10 +769,10 @@ class AsyncOmniEngine:
         plan: ReplicaInitPlan,
         stage_init_timeout: int,
         stage_launch_lock: threading.Lock,
-    ) -> StageDiffusionClient | InlineStageDiffusionClient:
+    ) -> StageDiffusionClientBase:
         """Initialize one diffusion replica end-to-end."""
 
-        client = None
+        client: StageDiffusionClientBase | None = None
         proc = None
         lock_fds: list[int] = []
         try:

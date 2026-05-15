@@ -39,16 +39,6 @@ class StageClient(Protocol):
     def shutdown(self) -> None: ...
 
 
-class StageClientBase:
-    """Runtime nominal base for stage clients.
-
-    Keeping the runtime base separate from the protocol avoids Protocol-related
-    MRO interference with concrete client super() calls.
-    """
-
-    pass
-
-
 class StagePoolClient(StageClient, Protocol):
     """Common pool-facing client surface shared by every stage backend."""
 

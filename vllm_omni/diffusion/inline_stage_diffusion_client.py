@@ -8,7 +8,6 @@ IPC overhead. Used when there is only a single diffusion stage.
 from __future__ import annotations
 
 import asyncio
-import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
@@ -20,7 +19,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from vllm_omni.diffusion.data import DiffusionRequestAbortedError
 from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
 from vllm_omni.diffusion.request import OmniDiffusionRequest
-from vllm_omni.engine.stage_client import StageClientBase
+from vllm_omni.diffusion.stage_diffusion_client_base import StageDiffusionClientBase
 from vllm_omni.engine.stage_init_utils import StageMetadata
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.outputs import OmniRequestOutput
@@ -32,12 +31,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class InlineStageDiffusionClient(StageClientBase):
+class InlineStageDiffusionClient(StageDiffusionClientBase):
     """Runs DiffusionEngine in a thread executor inside the Orchestrator."""
-
-    stage_type: str = "diffusion"
-    replica_id: int = 0
-    is_comprehension: bool = False
 
     def __init__(
         self,
@@ -48,29 +43,33 @@ class InlineStageDiffusionClient(StageClientBase):
     ) -> None:
         self.model = model
         self.od_config = od_config
-        self.stage_id = metadata.stage_id
-        self.replica_id = metadata.replica_id
-        self.final_output = metadata.final_output
-        self.final_output_type = metadata.final_output_type
-        self.default_sampling_params = metadata.default_sampling_params
-        self.requires_multimodal_data = metadata.requires_multimodal_data
-        self.custom_process_input_func = metadata.custom_process_input_func
-        self.engine_input_source = metadata.engine_input_source
-        self.batch_size = batch_size
+        self._initialize_stage_client(metadata, batch_size=batch_size)
 
         self._enrich_config()
         self._engine = DiffusionEngine.make_engine(self.od_config)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inline-diffusion")
-
-        self._output_queue: asyncio.Queue[OmniRequestOutput] = asyncio.Queue()
-        self._tasks: dict[str, asyncio.Task] = {}
-        self._shutting_down = False
+        self._register_executor_failure_callback()
 
         logger.info(
             "[InlineStageDiffusionClient] stage-%s [rep-%s] initialized inline (batch_size=%d)",
             self.stage_id,
             self.replica_id,
             self.batch_size,
+        )
+
+    def _register_executor_failure_callback(self) -> None:
+        register_failure_callback = getattr(self._engine.executor, "register_failure_callback", None)
+        if callable(register_failure_callback):
+            register_failure_callback(self._handle_executor_failure)
+
+    def _handle_executor_failure(self) -> None:
+        if self._shutting_down or self._engine_dead:
+            return
+        self._engine_dead = True
+        logger.error(
+            "[InlineStageDiffusionClient] stage-%s [rep-%s] executor failed unexpectedly.",
+            self.stage_id,
+            self.replica_id,
         )
 
     def _enrich_config(self) -> None:
@@ -249,6 +248,8 @@ class InlineStageDiffusionClient(StageClientBase):
         try:
             return self._output_queue.get_nowait()
         except asyncio.QueueEmpty:
+            if self._engine_dead:
+                raise EngineDeadError(f"Stage-{self.stage_id} inline diffusion engine is dead")
             return None
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
@@ -266,12 +267,11 @@ class InlineStageDiffusionClient(StageClientBase):
         kwargs: dict[str, Any] | None = None,
     ) -> Any:
         loop = asyncio.get_running_loop()
+        args = self._normalize_profile_rpc_args(method, args)
 
         if method == "profile":
             is_start = args[0] if args else True
             profile_prefix = args[1] if len(args) > 1 else None
-            if is_start and profile_prefix is None:
-                profile_prefix = f"stage_{self.stage_id}_rep_{self.replica_id}_diffusion_{int(time.time())}"
             return await loop.run_in_executor(
                 self._executor,
                 self._engine.profile,
@@ -351,7 +351,16 @@ class InlineStageDiffusionClient(StageClientBase):
         """Check if the inline diffusion engine and its workers are healthy."""
         if self._shutting_down:
             raise EngineDeadError("InlineStageDiffusionClient is shutting down")
-        self._engine.executor.check_health()
+        if self._engine_dead:
+            raise EngineDeadError(f"Stage-{self.stage_id} inline diffusion engine is dead")
+        try:
+            self._engine.executor.check_health()
+        except EngineDeadError:
+            self._engine_dead = True
+            raise
+        except Exception as exc:
+            self._engine_dead = True
+            raise EngineDeadError(f"Stage-{self.stage_id} inline diffusion engine health check failed") from exc
 
     def shutdown(self) -> None:
         self._shutting_down = True

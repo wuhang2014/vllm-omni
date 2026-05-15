@@ -15,7 +15,7 @@ import os
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -33,6 +33,9 @@ from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniSamplingParam
 from vllm_omni.inputs.preprocess import OmniInputPreprocessor
 from vllm_omni.platforms import current_omni_platform
 from vllm_omni.quantization.inc_config import OmniINCConfig
+
+if TYPE_CHECKING:
+    from vllm_omni.diffusion.stage_diffusion_client_base import StageDiffusionClientBase
 
 logger = init_logger(__name__)
 
@@ -912,7 +915,7 @@ def initialize_diffusion_stage(
     stage_init_timeout: int,
     batch_size: int = 1,
     use_inline: bool = False,
-) -> Any:
+) -> StageDiffusionClientBase:
     """Build a diffusion stage client.
 
     Args:
