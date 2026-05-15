@@ -24,6 +24,8 @@ from vllm_omni.diffusion.utils.network_utils import is_port_available
 from vllm_omni.quantization import build_quant_config
 
 if TYPE_CHECKING:
+    import argparse
+
     from vllm.config import ProfilerConfig
 
 # Import after TYPE_CHECKING to avoid circular imports at runtime
@@ -856,6 +858,18 @@ class OmniDiffusionConfig:
                     self.model_class_name = architectures[0]
                 else:
                     raise
+
+    @classmethod
+    def from_cli_args(cls, args: "argparse.Namespace") -> "OmniDiffusionConfig":
+        """Construct directly from an ``argparse.Namespace`` (single-stage path).
+
+        This is the preferred entry point when launching a diffusion model from
+        the command line without a stage_configs_path YAML.  For multi-stage
+        YAML-based configs use :meth:`from_kwargs` instead.
+        """
+        from vllm_omni.diffusion.arg_utils import DiffusionEngineArgs
+
+        return DiffusionEngineArgs.from_cli_args(args).to_diffusion_config()
 
     @classmethod
     def from_kwargs(cls, **kwargs: Any) -> "OmniDiffusionConfig":

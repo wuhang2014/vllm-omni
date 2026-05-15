@@ -1177,44 +1177,60 @@ class StageConfigFactory:
         diffusion models. Returns a legacy OmegaConf-compatible dict for
         backward compatibility with OmniStage.
 
+        Nested-config assembly (parallel, cache, attention) is delegated to
+        ``DiffusionEngineArgs.to_diffusion_config()``.
+
         Args:
             kwargs: Engine arguments from CLI/API.
 
         Returns:
             List containing a single config dict for the diffusion stage.
         """
-        # Calculate devices based on parallel config
-        devices = "0"
-        if "parallel_config" in kwargs:
-            num_devices = kwargs["parallel_config"].world_size
-            for i in range(1, num_devices):
-                devices += f",{i}"
+        from vllm_omni.diffusion.arg_utils import DiffusionEngineArgs
 
-        engine_args: dict[str, Any] = {}
-        for key, value in kwargs.items():
-            if key in ("parallel_config",):
-                continue
-            engine_args[key] = value
+        # Normalise dtype to string before passing to DiffusionEngineArgs so
+        # OmegaConf can serialise it (torch.dtype is not a primitive).
+        normalised = dict(kwargs)
+        if normalised.get("dtype") is None:
+            normalised["dtype"] = "auto"
+        if "dtype" in normalised and not isinstance(normalised["dtype"], str):
+            import torch
 
-        # Serialize parallel_config as dict for OmegaConf. Test helpers
-        # sometimes pass SimpleNamespace rather than a dataclass instance.
-        if "parallel_config" in kwargs:
-            parallel_config = kwargs["parallel_config"]
-            if dataclasses.is_dataclass(parallel_config) and not isinstance(parallel_config, type):
-                engine_args["parallel_config"] = asdict(parallel_config)
-            elif hasattr(parallel_config, "__dict__"):
-                engine_args["parallel_config"] = dict(vars(parallel_config))
+            if isinstance(normalised["dtype"], torch.dtype):
+                normalised["dtype"] = str(normalised["dtype"]).removeprefix("torch.")
+
+        # Handle a pre-built DiffusionParallelConfig passed via kwargs
+        # (test helpers and the orchestrator may do this).
+        parallel_config_obj = normalised.pop("parallel_config", None)
+        if parallel_config_obj is not None:
+            if dataclasses.is_dataclass(parallel_config_obj) and not isinstance(parallel_config_obj, type):
+                parallel_flat = asdict(parallel_config_obj)
+            elif hasattr(parallel_config_obj, "__dict__"):
+                parallel_flat = dict(vars(parallel_config_obj))
             else:
-                engine_args["parallel_config"] = parallel_config
+                parallel_flat = dict(parallel_config_obj) if isinstance(parallel_config_obj, dict) else {}
+            # Merge flat parallel fields into normalised so DiffusionEngineArgs picks them up
+            for k, v in parallel_flat.items():
+                normalised.setdefault(k, v)
 
-        engine_args.setdefault("cache_backend", "none")
-        engine_args["model_stage"] = "diffusion"
+        engine_args_obj = DiffusionEngineArgs.from_kwargs(**normalised)
+        od_config = engine_args_obj.to_diffusion_config()
 
-        # Convert dtype to string for OmegaConf
-        if "dtype" in engine_args:
-            engine_args["dtype"] = str(engine_args["dtype"])
+        num_devices = max(1, int(od_config.parallel_config.world_size))
+        devices = ",".join(str(i) for i in range(num_devices))
 
-        engine_args.setdefault("max_num_seqs", 1)
+        # Serialise parallel_config back to a plain dict for OmegaConf
+        engine_args: dict[str, Any] = {
+            "parallel_config": asdict(od_config.parallel_config),
+            "cache_backend": od_config.cache_backend,
+            "model_stage": "diffusion",
+            "max_num_seqs": od_config.max_num_seqs,
+            "dtype": normalised.get("dtype", "auto"),
+        }
+        # Forward remaining fields that were originally in kwargs
+        for key, value in normalised.items():
+            if key not in engine_args:
+                engine_args[key] = value
 
         config_dict: dict[str, Any] = {
             "stage_id": 0,

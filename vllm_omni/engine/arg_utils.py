@@ -353,6 +353,9 @@ class OmniAsyncEngineArgs(AsyncEngineArgs, OmniEngineArgs):
     def add_cli_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         parser = AsyncEngineArgs.add_cli_args(parser)
         parser = OmniEngineArgs._add_omni_specific_args(parser)
+        from vllm_omni.diffusion.arg_utils import DiffusionEngineArgs
+
+        parser = DiffusionEngineArgs.add_cli_args(parser)
         return parser
 
     @property
