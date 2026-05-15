@@ -553,17 +553,6 @@ class OmniServeCommand(CLISubcommand):
         return serve_parser
 
 
-def _create_default_diffusion_stage_cfg(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """Create default diffusion stage configuration.
-
-    Uses AsyncOmniEngine's implementation which doesn't have OmegaConf
-    compatibility issues.
-    """
-    from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
-
-    return AsyncOmniEngine._create_default_diffusion_stage_cfg(vars(args))
-
-
 def run_headless(args: argparse.Namespace) -> None:
     """Run a single stage in headless mode."""
     from vllm.v1.engine.coordinator import DPCoordinator
