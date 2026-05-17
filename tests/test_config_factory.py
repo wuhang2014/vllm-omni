@@ -15,6 +15,7 @@ import pytest
 
 from tests.helpers.stage_config import get_deploy_config_path
 from vllm_omni.config.stage_config import (
+    _OMNI_INTERNAL_KEYS,
     _PIPELINE_REGISTRY,
     DeployConfig,
     ModelPipeline,
@@ -35,7 +36,7 @@ from vllm_omni.config.stage_config import (
     register_pipeline,
     strip_parent_engine_args,
 )
-from vllm_omni.engine.arg_utils import SHARED_FIELDS, EngineArgs, internal_blacklist_keys
+from vllm_omni.engine.arg_utils import EngineArgs
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -359,8 +360,8 @@ class TestStageResolutionHelpers:
 
     def test_build_stage_runtime_overrides_ignores_other_stage_and_internal_keys(self):
         # Pass the same filter set the function uses by default
-        # (orchestrator-only fields plus SHARED_FIELDS so ``model`` is
-        # treated as not-per-stage-overridable).
+        # (orchestrator-only fields so ``model`` is treated as
+        # not-per-stage-overridable).
         overrides = build_stage_runtime_overrides(
             0,
             {
@@ -370,7 +371,7 @@ class TestStageResolutionHelpers:
                 "stage_0_model": "should_be_ignored",
                 "parallel_config": {"world_size": 2},
             },
-            internal_keys=internal_blacklist_keys() | SHARED_FIELDS,
+            internal_keys=_OMNI_INTERNAL_KEYS,
         )
 
         assert overrides["gpu_memory_utilization"] == 0.9

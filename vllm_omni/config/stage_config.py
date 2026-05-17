@@ -40,6 +40,52 @@ def _warn_deprecated_kwargs(kwargs: dict[str, Any]) -> None:
 
 _STAGE_OVERRIDE_PATTERN = re.compile(r"^stage_(\d+)_(.+)$")
 
+# Orchestrator-level and shared-pipeline fields that must never be forwarded
+# as per-stage engine overrides.  These are consumed by the orchestrator or
+# the top-level ``OmniEngineArgs``, not by individual stage engines.
+# Previously derived from ``OrchestratorArgs`` / ``SHARED_FIELDS`` in
+# ``arg_utils``; now defined here as a single source of truth.
+_OMNI_INTERNAL_KEYS: frozenset[str] = frozenset(
+    {
+        # ── Pipeline / lifecycle ──
+        "model",
+        "stage_id",
+        "stage_configs_path",
+        "stage_init_timeout",
+        "init_timeout",
+        "omni",
+        "headless",
+        "replica_id",
+        "omni_master_address",
+        "omni_master_port",
+        # ── Orchestrator communication ──
+        "shm_threshold_bytes",
+        "batch_timeout",
+        "async_chunk",
+        "worker_backend",
+        "ray_address",
+        # ── Config files ──
+        "deploy_config",
+        "stage_overrides",
+        # ── Observability ──
+        "log_stats",
+        "log_file",
+        "enable_diffusion_pipeline_profiler",
+        "enable_ar_profiler",
+        # ── Output routing ──
+        "output_modalities",
+        "diffusion_batch_size",
+        "tts_batch_max_items",
+        # ── Tokenizer (handled by orchestrator forwarding) ──
+        "tokenizer",
+        "parallel_config",
+        # ── Default sampling ──
+        "default_sampling_params",
+        "max_generated_image_size",
+        "tts_max_instructions_length",
+    }
+)
+
 
 def build_stage_runtime_overrides(
     stage_id: int,
@@ -49,18 +95,12 @@ def build_stage_runtime_overrides(
 ) -> dict[str, Any]:
     """Build per-stage runtime overrides from global and ``stage_<id>_*`` kwargs.
 
-    ``internal_keys`` defaults to the union of
-    ``arg_utils.internal_blacklist_keys()`` and ``arg_utils.SHARED_FIELDS``
-    so that neither orchestrator-only fields nor shared-pipeline fields
-    (``model`` / ``stage_configs_path`` / ``log_stats`` / ``stage_id``) leak
-    into a stage's per-stage runtime overrides — the orchestrator sets those
-    uniformly for every stage, they are not per-stage knobs. Callers can
-    pass an explicit set for tests or specialized flows.
+    ``internal_keys`` defaults to :data:`_OMNI_INTERNAL_KEYS` so that
+    orchestrator-only flags do not leak into per-stage engine overrides.
+    Callers can pass an explicit set for tests or specialized flows.
     """
     if internal_keys is None:
-        from vllm_omni.engine.arg_utils import SHARED_FIELDS, internal_blacklist_keys
-
-        internal_keys = internal_blacklist_keys() | SHARED_FIELDS
+        internal_keys = _OMNI_INTERNAL_KEYS
 
     result: dict[str, Any] = {}
 

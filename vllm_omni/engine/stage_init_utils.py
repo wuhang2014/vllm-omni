@@ -677,41 +677,67 @@ def build_stage0_input_processor(stage_vllm_config: Any) -> InputProcessor:
     return input_processor
 
 
+def _extract_device_counts(config: Any) -> dict[str, int]:
+    """Extract per-dimension device counts from *config*.
+
+    Accepts:
+      - ``VllmConfig`` (LLM stages) — reads ``.parallel_config.tensor_parallel_size``
+      - ``OmniDiffusionConfig`` (diffusion stages) — reads ``.parallel_config.world_size``
+    """
+    pc = config.parallel_config
+
+    # DiffusionParallelConfig uses ``world_size`` as the total device count
+    if hasattr(pc, "world_size"):
+        ws = getattr(pc, "world_size", 1)
+        try:
+            ws = max(1, int(ws))
+        except (TypeError, ValueError):
+            ws = 1
+        return {
+            "tensor_parallel_size": ws,
+            "pipeline_parallel_size": 1,
+            "data_parallel_size": 1,
+            "prefill_context_parallel_size": 1,
+            "sequence_parallel_size": 1,
+            "cfg_parallel_size": 1,
+        }
+
+    # VllmConfig: full parallel_config
+    return {
+        "tensor_parallel_size": getattr(pc, "tensor_parallel_size", 1) or 1,
+        "pipeline_parallel_size": getattr(pc, "pipeline_parallel_size", 1) or 1,
+        "data_parallel_size": getattr(pc, "data_parallel_size", 1) or 1,
+        "prefill_context_parallel_size": getattr(pc, "prefill_context_parallel_size", 1) or 1,
+        "sequence_parallel_size": getattr(pc, "sequence_parallel_size", 1) or 1,
+        "cfg_parallel_size": getattr(pc, "cfg_parallel_size", 1) or 1,
+    }
+
+
 def acquire_device_locks(
     stage_id: int,
-    engine_args_dict: dict[str, Any],
+    config: Any,
     stage_init_timeout: int,
 ) -> list[int]:
     """Acquire exclusive file locks on devices needed by this stage.
 
+    *config* may be any of:
+
+    - ``VllmConfig`` (LLM stages) — reads ``.parallel_config``
+    - ``OmniDiffusionConfig`` (diffusion stages) — reads ``.parallel_config.world_size``
+
     Returns list of lock file descriptors that must be released after init.
     """
+    counts = _extract_device_counts(config)
+
     lock_fds: list[int] = []
     try:
-        # Get parallel sizes
-        if "parallel_config" in engine_args_dict:
-            pc = engine_args_dict["parallel_config"]
-            tensor_parallel_size = pc.get("tensor_parallel_size", 1)
-            pipeline_parallel_size = pc.get("pipeline_parallel_size", 1)
-            data_parallel_size = pc.get("data_parallel_size", 1)
-            prefill_context_parallel_size = pc.get("prefill_context_parallel_size", 1)
-            sequence_parallel_size = pc.get("sequence_parallel_size", 1)
-            cfg_parallel_size = pc.get("cfg_parallel_size", 1)
-        else:
-            tensor_parallel_size = engine_args_dict.get("tensor_parallel_size", 1)
-            pipeline_parallel_size = engine_args_dict.get("pipeline_parallel_size", 1)
-            data_parallel_size = engine_args_dict.get("data_parallel_size", 1)
-            prefill_context_parallel_size = engine_args_dict.get("prefill_context_parallel_size", 1)
-            sequence_parallel_size = 1
-            cfg_parallel_size = 1
-
         num_devices_per_stage = (
-            tensor_parallel_size
-            * pipeline_parallel_size
-            * data_parallel_size
-            * prefill_context_parallel_size
-            * sequence_parallel_size
-            * cfg_parallel_size
+            counts["tensor_parallel_size"]
+            * counts["pipeline_parallel_size"]
+            * counts["data_parallel_size"]
+            * counts["prefill_context_parallel_size"]
+            * counts["sequence_parallel_size"]
+            * counts["cfg_parallel_size"]
         )
 
         # Get physical device IDs
@@ -740,12 +766,12 @@ def acquire_device_locks(
 
         logger.debug(
             "Parallel config: TP=%d, PP=%d, DP=%d, PCP=%d, SP=%d, CFG=%d; will lock %d devices: %s",
-            tensor_parallel_size,
-            pipeline_parallel_size,
-            data_parallel_size,
-            prefill_context_parallel_size,
-            sequence_parallel_size,
-            cfg_parallel_size,
+            counts["tensor_parallel_size"],
+            counts["pipeline_parallel_size"],
+            counts["data_parallel_size"],
+            counts["prefill_context_parallel_size"],
+            counts["sequence_parallel_size"],
+            counts["cfg_parallel_size"],
             num_devices_to_lock,
             devices_to_lock,
         )
@@ -816,23 +842,10 @@ def acquire_diffusion_device_locks(
 ) -> list[int]:
     """Acquire init locks for the GPU set used by a diffusion stage.
 
-    Diffusion stages express their device count via ``OmniDiffusionConfig``'s
-    ``parallel_config.world_size`` rather than the LLM-style
-    ``tensor_parallel_size`` knob, so adapt to the shape that
-    ``acquire_device_locks`` understands.
+    Delegates to :func:`acquire_device_locks` which now handles
+    ``OmniDiffusionConfig`` natively.
     """
-    parallel_config = getattr(od_config, "parallel_config", None)
-    world_size = getattr(parallel_config, "world_size", 1)
-    try:
-        world_size = max(1, int(world_size))
-    except (TypeError, ValueError):
-        world_size = 1
-
-    return acquire_device_locks(
-        stage_id,
-        {"tensor_parallel_size": world_size},
-        stage_init_timeout,
-    )
+    return acquire_device_locks(stage_id, od_config, stage_init_timeout)
 
 
 def load_omni_transfer_config_for_model(model: str, config_path: str | None) -> Any:

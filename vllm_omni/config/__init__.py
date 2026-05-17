@@ -18,6 +18,10 @@ from vllm_omni.config.stage_config import (
     merge_pipeline_deploy,
     register_pipeline,
 )
+from vllm_omni.config.vllm_omni_config import (
+    StageResolvedConfig,
+    VllmOmniConfig,
+)
 from vllm_omni.config.yaml_util import (
     create_config,
     load_yaml_config,
@@ -44,4 +48,6 @@ __all__ = [
     "load_yaml_config",
     "merge_configs",
     "to_dict",
+    "VllmOmniConfig",
+    "StageResolvedConfig",
 ]

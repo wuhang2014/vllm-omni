@@ -7,12 +7,13 @@ import time
 import warnings
 import weakref
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import huggingface_hub
 from vllm.logger import init_logger
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
+from vllm_omni.engine.arg_utils import OmniEngineArgs
 from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
 from vllm_omni.engine.messages import (
     EngineQueueMessage,
@@ -26,9 +27,6 @@ from vllm_omni.entrypoints.utils import coerce_param_message_types, get_final_st
 from vllm_omni.metrics.stats import OrchestratorAggregator as OrchestratorMetrics
 from vllm_omni.model_executor.model_loader.weight_utils import download_weights_from_hf_specific
 from vllm_omni.outputs import OmniRequestOutput
-
-if TYPE_CHECKING:
-    from vllm_omni.engine.arg_utils import OmniEngineArgs
 
 logger = init_logger(__name__)
 
@@ -142,42 +140,39 @@ class OmniBase(PDDisaggregationMixin):
         model: str,
         **kwargs: Any,
     ) -> None:
+        # Support direct OmniEngineArgs if caller provides one (preferred) or
+        # construct from kwargs (backward compat).
         engine_args: OmniEngineArgs | None = kwargs.pop("engine_args", None)
-
-        stage_init_timeout = kwargs.pop("stage_init_timeout", 300)
-        init_timeout = kwargs.pop("init_timeout", 600)
-        log_stats = kwargs.pop("log_stats", False)
-        self._enable_ar_profiler = kwargs.pop("enable_ar_profiler", False)
-        # NOTE: read-only lookup — must NOT pop. Popping here drops the key
-        # before it reaches ``StageConfigFactory._create_from_registry``, so
-        # ``--no-async-chunk`` (``async_chunk=False``) silently fails to
-        # override the deploy YAML's ``async_chunk: true`` default.
-        async_chunk = kwargs.get("async_chunk")
-        output_modalities = kwargs.pop("output_modalities", None)
-        diffusion_batch_size: int = kwargs.pop("diffusion_batch_size", 1)
+        if engine_args is not None:
+            omni_engine_args = engine_args
+        else:
+            omni_engine_args = OmniEngineArgs(model=model, **kwargs)
 
         if "log_requests" in kwargs:
             raise TypeError("`log_requests` has been removed in Omni/AsyncOmni. Use `log_stats`.")
+
+        self._enable_ar_profiler = omni_engine_args.enable_ar_profiler
+
+        # Build resolved config (single factory call replaces scattered kwarg popping)
+        self.omni_config = omni_engine_args.create_omni_config()
+
         model = omni_snapshot_download(model)
         self.__dict__["_name"] = self.__class__.__name__
         self.model = model
-        self.log_stats = log_stats
-        # Provisional value (mirrors the CLI/caller kwarg); the engine resolves
-        # pipeline + deploy YAML + CLI precedence below and the final value is
-        # re-assigned from ``self.engine.async_chunk`` after init.
-        self.async_chunk = bool(async_chunk) if async_chunk is not None else False
-        self.output_modalities = output_modalities or []
-        self.tts_batch_max_items: int = kwargs.pop("tts_batch_max_items", 32)
+        self.log_stats = self.omni_config.log_stats
+        self.async_chunk = self.omni_config.async_chunk
+        self.output_modalities = omni_engine_args.output_modalities or []
+        self.tts_batch_max_items: int = omni_engine_args.tts_batch_max_items
 
         logger.info("[%s] Initializing with model %s", self.__class__.__name__, model)
         st = time.time()
         self.engine = AsyncOmniEngine(
             model=model,
-            engine_args=engine_args,
-            init_timeout=init_timeout,
-            stage_init_timeout=stage_init_timeout,
-            diffusion_batch_size=diffusion_batch_size,
-            **kwargs,
+            omni_config=self.omni_config,
+            engine_args=omni_engine_args,
+            init_timeout=self.omni_config.init_timeout,
+            stage_init_timeout=self.omni_config.stage_init_timeout,
+            diffusion_batch_size=omni_engine_args.diffusion_batch_size,
         )
         self._shutdown_called = False
         self._weak_finalizer = weakref.finalize(self, _weak_shutdown_engine, self.engine)
@@ -194,15 +189,15 @@ class OmniBase(PDDisaggregationMixin):
         self.default_sampling_params_list = self.engine.default_sampling_params_list
         if not self.output_modalities:
             self.output_modalities = [
-                self.engine.get_stage_metadata(i).final_output_type for i in range(self.engine.num_stages)
+                self.engine.get_stage_metadata(i).final_output_type for i in range(self.omni_config.num_stages)
             ]
 
-        self._stage_meta_list = [self.engine.get_stage_metadata(i) for i in range(self.engine.num_stages)]
+        self._stage_meta_list = [self.engine.get_stage_metadata(i) for i in range(self.omni_config.num_stages)]
 
         logger.info(
             "[%s] Initialized with %s stages for model %s",
             self.__class__.__name__,
-            self.engine.num_stages,
+            self.omni_config.num_stages,
             model,
         )
 

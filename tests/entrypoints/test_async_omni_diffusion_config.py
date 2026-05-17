@@ -9,9 +9,14 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm_omni.config.stage_config import deploy_override_field_names
 from vllm_omni.diffusion.data import AttentionConfig
 from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
-from vllm_omni.entrypoints.cli.serve import OmniServeCommand, _create_default_diffusion_stage_cfg
+from vllm_omni.entrypoints.cli.serve import OmniServeCommand
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
+
+def _create_default_diffusion_stage_cfg(args):
+    """Thin wrapper for test backward compat — delegates to the engine method."""
+    return AsyncOmniEngine._create_default_diffusion_stage_cfg(vars(args))
 
 
 def test_default_stage_config_includes_cache_backend():

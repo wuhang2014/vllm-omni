@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import time as _time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import janus
 import torch
@@ -38,6 +38,9 @@ from vllm_omni.engine.messages import (
 from vllm_omni.engine.serialization import serialize_additional_information
 from vllm_omni.engine.stage_pool import StagePool
 from vllm_omni.outputs import OmniRequestOutput
+
+if TYPE_CHECKING:
+    from vllm_omni.config.vllm_omni_config import VllmOmniConfig
 
 logger = init_logger(__name__)
 
@@ -131,6 +134,7 @@ class Orchestrator:
         rpc_async_queue: janus.AsyncQueue[dict[str, Any]],
         stage_pools: list[StagePool],
         *,
+        omni_config: VllmOmniConfig | None = None,
         async_chunk: bool = False,
         pd_config: dict[str, Any] | None = None,
     ) -> None:
@@ -138,7 +142,8 @@ class Orchestrator:
         self.output_async_queue = output_async_queue
         self.rpc_async_queue = rpc_async_queue
 
-        self.async_chunk = bool(async_chunk)
+        self.omni_config = omni_config
+        self.async_chunk = bool(omni_config.async_chunk if omni_config is not None else async_chunk)
         self.num_stages = len(stage_pools)
         self.stage_pools: list[StagePool] = stage_pools
 
@@ -147,6 +152,8 @@ class Orchestrator:
         self._pd_bootstrap_addr: str | None = None
         self._pd_prefill_engine_id: str | None = None
         self._pd_kv_params: dict[str, Any] = {}
+        if omni_config is not None and omni_config.pd_config is not None:
+            pd_config = omni_config.pd_config
         if pd_config is not None:
             self._pd_pair = pd_config.get("pd_pair")
             self._pd_bootstrap_addr = pd_config.get("bootstrap_addr")
