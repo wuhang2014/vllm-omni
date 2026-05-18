@@ -86,6 +86,54 @@ class PydanticMagicMock(MagicMock):
 # --- Static extraction for CLI argument docs ---
 
 
+def extract_omni_engine_args_add_cli_args():
+    """Statically extract OmniEngineArgs.add_cli_args for docs generation."""
+    arg_utils_path = ROOT_DIR / "vllm_omni" / "engine" / "arg_utils.py"
+    with open(arg_utils_path, encoding="utf-8") as f:
+        source = f.read()
+    tree = ast.parse(source, filename=str(arg_utils_path))
+
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "OmniEngineArgs":
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef) and item.name == "add_cli_args":
+                    class_code = ast.Module(
+                        body=[
+                            ast.ClassDef(
+                                name="_DocsOmniEngineArgs",
+                                bases=[],
+                                keywords=[],
+                                body=[item],
+                                decorator_list=[],
+                            )
+                        ],
+                        type_ignores=[],
+                    )
+                    ast.fix_missing_locations(class_code)
+                    local_vars = {}
+                    exec_globals = {
+                        "argparse": __import__("argparse"),
+                        "json": __import__("json"),
+                        "EngineArgs": type(
+                            "EngineArgs",
+                            (),
+                            {"add_cli_args": staticmethod(lambda parser: parser)},
+                        ),
+                    }
+                    code = compile(class_code, filename=str(arg_utils_path), mode="exec")
+                    exec(code, exec_globals, local_vars)
+                    return local_vars["_DocsOmniEngineArgs"].add_cli_args
+
+    raise RuntimeError("Could not statically extract OmniEngineArgs.add_cli_args")
+
+
+OmniEngineArgs = type(
+    "OmniEngineArgs",
+    (),
+    {"add_cli_args": staticmethod(extract_omni_engine_args_add_cli_args())},
+)
+
+
 def extract_omni_serve_subparser_init():
     """
     Statically parse vllm_omni/entrypoints/cli/serve.py to extract the subparser_init method
@@ -119,6 +167,7 @@ def extract_omni_serve_subparser_init():
                     exec_globals = {
                         "_FlexibleArgumentParser": _FlexibleArgumentParser,
                         "FlexibleArgumentParser": _FlexibleArgumentParser,
+                        "OmniEngineArgs": OmniEngineArgs,
                         "make_arg_parser": lambda parser: parser,  # no-op for doc
                         "_ensure_vllm_platform": lambda: None,  # no-op for doc
                         "nullify_stage_engine_defaults": lambda parser: None,  # no-op for doc
