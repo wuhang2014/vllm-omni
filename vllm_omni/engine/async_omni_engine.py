@@ -272,18 +272,22 @@ class AsyncOmniEngine:
         logger.info(f"[AsyncOmniEngine] Initializing with model {model}")
 
         # Merge tracked engine_args fields into kwargs; explicit kwargs take priority.
+        # Only enforce _explicit_fields when omni_config is absent (old path).
+        # When omni_config is available, engine_args is used for tokenizer/single-stage
+        # fields only, not for kwargs merging.
         if engine_args is not None:
-            if not hasattr(engine_args, "_explicit_fields"):
+            if omni_config is None and not hasattr(engine_args, "_explicit_fields"):
                 raise TypeError(
                     "engine_args=OmniEngineArgs(...) is ambiguous under "
                     "sentinel-default precedence. Use "
                     "OmniEngineArgs.create(**explicit) or pass explicit kwargs "
                     "directly."
                 )
-            ea_dict = engine_args.explicit_kwargs()
-            # Remove model since it is passed as a positional arg already.
-            ea_dict.pop("model", None)
-            kwargs = {**ea_dict, **kwargs}
+            if hasattr(engine_args, "_explicit_fields"):
+                ea_dict = engine_args.explicit_kwargs()
+                # Remove model since it is passed as a positional arg already.
+                ea_dict.pop("model", None)
+                kwargs = {**ea_dict, **kwargs}
 
         self.model = omni_config.model if omni_config is not None else model
         self.tokenizer: str | None = engine_args.tokenizer if engine_args is not None else kwargs.get("tokenizer")
