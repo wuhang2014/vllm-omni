@@ -279,18 +279,20 @@ def build_vllm_omni_config(
                 log_stats=log_stats,
             )
 
-        # Diffusion fallback
-        from omegaconf import OmegaConf
-
-        default_cfg = OmegaConf.create(
+        # Diffusion fallback — build a simple stub with the attributes
+        # that extract_stage_metadata / build_diffusion_config need,
+        # avoiding an OmegaConf roundtrip.
+        default_cfg = type(
+            "_DefaultDiffusionCfg",
+            (),
             {
                 "stage_id": 0,
                 "stage_type": "diffusion",
                 "engine_args": cli_overrides,
                 "final_output": True,
                 "runtime": {"devices": cli_overrides.get("devices")},
-            }
-        )
+            },
+        )()
         metadata = extract_stage_metadata(default_cfg)
         diffusion_config = build_diffusion_config(model, default_cfg, metadata)
 
