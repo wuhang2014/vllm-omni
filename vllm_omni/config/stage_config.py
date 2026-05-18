@@ -979,7 +979,12 @@ class StageConfig:
     runtime_overrides: dict[str, Any] = field(default_factory=dict)
 
     def to_omegaconf(self) -> Any:
-        """TODO(@lishunyang12): remove once engine consumes ResolvedStageConfig directly."""
+        """TODO(@lishunyang12): Remove to_omegaconf() once engine exclusively
+        consumes StageResolvedConfig/VllmOmniConfig. See PR #3672.
+        Migration steps:
+        1. All models migrate to PipelineConfig (pipeline_registry).
+        2. stage_configs list replaced by omni_config.stages in all consumers.
+        3. OmegaConf removed from vllm_omni/config/vllm_omni_config.py hot path."""
         # Start with YAML engine_args defaults
         engine_args: dict[str, Any] = dict(self.yaml_engine_args)
 

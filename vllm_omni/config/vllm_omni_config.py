@@ -20,7 +20,7 @@ These are built by ``OmniEngineArgs.create_omni_config()``
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from vllm_omni.config.stage_config import PipelineConfig
@@ -99,6 +99,26 @@ class StageResolvedConfig:
 
     prompt_expand_func: Callable[..., Any] | None = None
     """Optional function that expands a prompt before stage submission."""
+
+
+# ---------------------------------------------------------------------------
+# Ad-hoc config stubs (replaces anonymous type() calls)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DefaultDiffusionCfg:
+    """Minimal stub config used when no pipeline is registered for the model.
+
+    Provides the attributes that ``extract_stage_metadata`` and
+    ``build_diffusion_config`` expect without an OmegaConf roundtrip.
+    """
+
+    stage_id: int = 0
+    stage_type: str = "diffusion"
+    engine_args: dict[str, Any] = field(default_factory=dict)
+    final_output: bool = True
+    runtime: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -200,49 +220,33 @@ class VllmOmniConfig:
 
 
 # ---------------------------------------------------------------------------
-# Factory: build_vllm_omni_config
+# Factory helpers
 # ---------------------------------------------------------------------------
 
+_ORCHESTRATOR_KWARG_DEFAULTS: dict[str, Any] = {
+    "stage_init_timeout": 300,
+    "init_timeout": 600,
+    "shm_threshold_bytes": 65536,
+    "batch_timeout": 10,
+    "worker_backend": "multi_process",
+    "log_stats": False,
+}
 
-def build_vllm_omni_config(
-    model: str,
-    *,
-    engine_args: Any = None,
-    stage_init_timeout: int = 300,
-    init_timeout: int = 600,
-    shm_threshold_bytes: int = 65536,
-    batch_timeout: int = 10,
-    worker_backend: str = "multi_process",
-    log_stats: bool = False,
-    deploy_config: str | None = None,
+
+def _build_cli_overrides(
+    engine_args: Any,
+    kwargs: dict[str, Any],
     stage_overrides: dict[str, dict[str, Any]] | None = None,
-    **kwargs: Any,
-) -> VllmOmniConfig:
-    """Build a resolved ``VllmOmniConfig`` from engine arguments.
+) -> dict[str, Any]:
+    """Build CLI overrides dict from engine args or raw kwargs.
 
-    This is the single factory that replaces the old scattered config
-    construction (``_resolve_stage_configs``, ``build_vllm_config``,
-    ``build_diffusion_config``, Phase 2 injection loop, etc.).
-
-    Called by :meth:`OmniEngineArgs.create_omni_config` and by offline
-    callers that have an ``OmniEngineArgs`` instance.
+    When *engine_args* is a dataclass instance, extracts all non-None field
+    values.  Otherwise falls back to *kwargs*.  Stage-level overrides are
+    applied as ``stage_<id>_<key>`` prefixed keys.
     """
-    # ── Resolve stage configs from pipeline registry + deploy YAML ──
-    from vllm_omni.distributed.omni_connectors.utils.initialization import (
-        resolve_omni_kv_config_for_stage,
-    )
-    from vllm_omni.engine.stage_init_utils import (
-        build_diffusion_config,
-        build_engine_args_dict,
-        build_vllm_config,
-        compute_replica_layout,
-        extract_stage_metadata,
-        get_stage_connector_spec,
-        load_omni_transfer_config_for_model,
-    )
-    from vllm_omni.entrypoints.utils import _convert_dataclasses_to_dict, load_stage_configs_from_model
+    # defer import to avoid circular dependency with vllm_omni.entrypoints.utils
+    from vllm_omni.entrypoints.utils import _convert_dataclasses_to_dict
 
-    # Build CLI overrides from engine args (replace kwargs dict)
     if engine_args is not None:
         cli_overrides = _convert_dataclasses_to_dict(
             {
@@ -254,86 +258,91 @@ def build_vllm_omni_config(
     else:
         cli_overrides = _convert_dataclasses_to_dict(dict(kwargs))
 
-    # Apply stage_overrides to cli_overrides
     if stage_overrides:
         for stage_id_str, overrides in stage_overrides.items():
             for key, val in overrides.items():
                 cli_overrides[f"stage_{stage_id_str}_{key}"] = val
 
-    # Load and merge stage configs
-    stage_configs = load_stage_configs_from_model(
-        model,
-        base_engine_args=cli_overrides,
-        deploy_config_path=deploy_config,
-        stage_overrides=stage_overrides,
-    )
+    return cli_overrides
 
-    if not stage_configs:
-        # No pipeline config found — default to single-stage diffusion.
-        # Only skip the diffusion fallback when the caller explicitly asked
-        # for an LLM worker (--worker-type ar/generation).  None means
-        # "not specified" and was the common case for diffusion models
-        # before the unified config — preserve that behaviour.
-        worker_type = getattr(engine_args, "worker_type", None) if engine_args is not None else None
-        if worker_type in ("ar", "generation"):
-            # Pure LLM — return empty config, legacy path handles it
-            return VllmOmniConfig(
-                model=model,
-                async_chunk=False,
-                stage_init_timeout=stage_init_timeout,
-                init_timeout=init_timeout,
-                shm_threshold_bytes=shm_threshold_bytes,
-                batch_timeout=batch_timeout,
-                worker_backend=worker_backend,
-                log_stats=log_stats,
-            )
 
-        # Diffusion fallback — build a simple stub with the attributes
-        # that extract_stage_metadata / build_diffusion_config need,
-        # avoiding an OmegaConf roundtrip.
-        default_cfg = type(
-            "_DefaultDiffusionCfg",
-            (),
-            {
-                "stage_id": 0,
-                "stage_type": "diffusion",
-                "engine_args": cli_overrides,
-                "final_output": True,
-                "runtime": {"devices": cli_overrides.get("devices")},
-            },
-        )()
-        metadata = extract_stage_metadata(default_cfg)
-        diffusion_config = build_diffusion_config(model, default_cfg, metadata)
+def _build_default_diffusion_config(
+    model: str,
+    cli_overrides: dict[str, Any],
+    engine_args: Any,
+    **orchestrator_kwargs: Any,
+) -> VllmOmniConfig:
+    """Build a single-stage diffusion ``VllmOmniConfig`` when no pipeline is registered.
 
+    Only entered when ``load_stage_configs_from_model`` returns no stages.
+    Returns an empty LLM config (for pure-AR workers) when ``engine_args.worker_type``
+    is ``"ar"`` or ``"generation"``; otherwise builds a single diffusion stage.
+    """
+    # defer import to avoid circular dependency with vllm_omni.engine.stage_init_utils
+    from vllm_omni.engine.stage_init_utils import build_diffusion_config, extract_stage_metadata
+
+    worker_type = getattr(engine_args, "worker_type", None) if engine_args is not None else None
+    if worker_type in ("ar", "generation"):
         return VllmOmniConfig(
             model=model,
-            stages=(
-                StageResolvedConfig(
-                    stage_id=0,
-                    stage_type="diffusion",
-                    diffusion_config=diffusion_config,
-                    metadata=metadata,
-                    num_replicas=1,
-                ),
-            ),
             async_chunk=False,
-            stage_init_timeout=stage_init_timeout,
-            init_timeout=init_timeout,
-            shm_threshold_bytes=shm_threshold_bytes,
-            batch_timeout=batch_timeout,
-            worker_backend=worker_backend,
-            log_stats=log_stats,
+            **{k: orchestrator_kwargs.get(k, v) for k, v in _ORCHESTRATOR_KWARG_DEFAULTS.items()},
         )
 
-    # Resolve async_chunk: CLI override wins over deploy YAML.
-    # Use kwargs.get without default so None = "not set by user" and
-    # deploy YAML value is used via the is None fallback below.
-    async_chunk: bool | None = kwargs.get("async_chunk")
+    # Build a stub config that provides the attributes
+    # extract_stage_metadata / build_diffusion_config expect.
+    default_cfg = DefaultDiffusionCfg(
+        engine_args=cli_overrides,
+        runtime={"devices": cli_overrides.get("devices")},
+    )
+    metadata = extract_stage_metadata(default_cfg)
+    diffusion_config = build_diffusion_config(model, default_cfg, metadata)
 
-    # ── Pre-build per-stage configs ──────────────────────────────────
-    replicas_per_stage, replica_devices_map = compute_replica_layout(stage_configs)
-    omni_transfer_config = load_omni_transfer_config_for_model(
-        model, getattr(stage_configs[0], "_config_path", None) if stage_configs else None
+    return VllmOmniConfig(
+        model=model,
+        stages=(
+            StageResolvedConfig(
+                stage_id=0,
+                stage_type="diffusion",
+                diffusion_config=diffusion_config,
+                metadata=metadata,
+                num_replicas=1,
+            ),
+        ),
+        async_chunk=False,
+        **{k: orchestrator_kwargs.get(k, v) for k, v in _ORCHESTRATOR_KWARG_DEFAULTS.items()},
+    )
+
+
+def _resolve_stages(
+    model: str,
+    stage_configs: list,
+    engine_args: Any,
+    async_chunk: bool | None,
+    omni_transfer_config: Any,
+    replicas_per_stage: list[int],
+    replica_devices_map: dict[int, list[str]],
+) -> tuple[list[StageResolvedConfig], Callable[..., Any] | None]:
+    """Build ``StageResolvedConfig`` for every stage in *stage_configs*.
+
+    Handles both LLM and diffusion stages — building ``VllmConfig``,
+    ``OmniDiffusionConfig``, KV connectors, and runtime metadata.
+
+    Returns ``(resolved_stages, prompt_expand_func)``.
+    """
+    # NOTE: These imports are deferred to avoid circular dependency with
+    # vllm_omni.engine.stage_init_utils (which imports OmniEngineArgs
+    # from vllm_omni.engine.arg_utils, and arg_utils imports VllmOmniConfig
+    # from this module).
+    from vllm_omni.distributed.omni_connectors.utils.initialization import (
+        resolve_omni_kv_config_for_stage,
+    )
+    from vllm_omni.engine.stage_init_utils import (
+        build_diffusion_config,
+        build_engine_args_dict,
+        build_vllm_config,
+        extract_stage_metadata,
+        get_stage_connector_spec,
     )
 
     resolved_stages: list[StageResolvedConfig] = []
@@ -354,6 +363,7 @@ def build_vllm_omni_config(
         omni_kv_connector = resolve_omni_kv_config_for_stage(omni_transfer_config, stage_id)
 
         num_replicas = replicas_per_stage[stage_idx] if stage_idx < len(replicas_per_stage) else 1
+
         runtime = getattr(stage_cfg, "runtime", None)
         if runtime is not None and hasattr(runtime, "get"):
             runtime = dict(runtime)
@@ -406,19 +416,136 @@ def build_vllm_omni_config(
             )
         )
 
-    # ── Detect PD config ─────────────────────────────────────────────
-    # Use the original OmegaConf stage_configs which carry is_prefill_only /
-    # is_decode_only flags — StageResolvedConfig does not expose those.
+    return resolved_stages, prompt_expand_func
+
+
+def _resolve_async_chunk(
+    explicit_cli_value: bool | None,
+    resolved_stages: list,
+    stage_configs: list,
+) -> bool:
+    """Resolve the final ``async_chunk`` value with clear precedence.
+
+    Precedence (highest to lowest):
+    1. Explicit CLI override (*explicit_cli_value* not ``None``).
+       Passed through from ``kwargs.get("async_chunk")`` where ``None`` means
+       "the user did not type ``--async-chunk`` or ``--no-async-chunk``".
+    2. Deploy YAML / pipeline value (already baked into stage_configs via
+       ``merge_pipeline_deploy`` and resolved in ``StageConfigFactory``).
+    3. Stage 0 ``engine_args.async_chunk`` (OmegaConf fallback from legacy
+       stage config loading).
+    4. Default: ``False``.
+    """
+    if explicit_cli_value is not None:
+        return bool(explicit_cli_value)
+
+    if resolved_stages:
+        return bool(
+            getattr(
+                getattr(stage_configs[0], "engine_args", None),
+                "async_chunk",
+                False,
+            )
+        )
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Factory: build_vllm_omni_config
+# ---------------------------------------------------------------------------
+
+
+def build_vllm_omni_config(
+    model: str,
+    *,
+    engine_args: Any = None,
+    stage_init_timeout: int = 300,
+    init_timeout: int = 600,
+    shm_threshold_bytes: int = 65536,
+    batch_timeout: int = 10,
+    worker_backend: str = "multi_process",
+    log_stats: bool = False,
+    deploy_config: str | None = None,
+    stage_overrides: dict[str, dict[str, Any]] | None = None,
+    **kwargs: Any,
+) -> VllmOmniConfig:
+    """Build a resolved ``VllmOmniConfig`` from engine arguments.
+
+    This is the single factory that replaces the old scattered config
+    construction (``_resolve_stage_configs``, ``build_vllm_config``,
+    ``build_diffusion_config``, Phase 2 injection loop, etc.).
+
+    Delegates to the following helpers:
+
+    - :func:`_build_cli_overrides` — convert engine args → flat dict
+    - :func:`_build_default_diffusion_config` — fallback when no pipeline found
+    - :func:`_resolve_stages` — build per-stage ``StageResolvedConfig``
+    - :func:`_resolve_async_chunk` — resolve async_chunk precedence
+    """
+    from vllm_omni.engine.stage_init_utils import (
+        compute_replica_layout,
+        load_omni_transfer_config_for_model,
+    )
+    from vllm_omni.entrypoints.utils import load_stage_configs_from_model
+
+    # 1. Build CLI overrides dict
+    cli_overrides = _build_cli_overrides(engine_args, kwargs, stage_overrides)
+
+    # 2. Load and merge stage configs
+    stage_configs = load_stage_configs_from_model(
+        model,
+        base_engine_args=cli_overrides,
+        deploy_config_path=deploy_config,
+        stage_overrides=stage_overrides,
+    )
+
+    # 3. Handle missing pipeline — delegate to default-diffusion builder
+    if not stage_configs:
+        return _build_default_diffusion_config(
+            model=model,
+            cli_overrides=cli_overrides,
+            engine_args=engine_args,
+            stage_init_timeout=stage_init_timeout,
+            init_timeout=init_timeout,
+            shm_threshold_bytes=shm_threshold_bytes,
+            batch_timeout=batch_timeout,
+            worker_backend=worker_backend,
+            log_stats=log_stats,
+        )
+
+    # 4. Resolve async_chunk: CLI override wins over deploy YAML.
+    #    Use kwargs.get without default so None = "not set by user".
+    explicit_async_chunk: bool | None = kwargs.get("async_chunk")
+
+    # 5. Compute replica layout and transfer config
+    replicas_per_stage, replica_devices_map = compute_replica_layout(stage_configs)
+    omni_transfer_config = load_omni_transfer_config_for_model(
+        model, getattr(stage_configs[0], "_config_path", None) if stage_configs else None
+    )
+
+    # 6. Build per-stage resolved configs
+    resolved_stages, prompt_expand_func = _resolve_stages(
+        model=model,
+        stage_configs=stage_configs,
+        engine_args=engine_args,
+        async_chunk=explicit_async_chunk,
+        omni_transfer_config=omni_transfer_config,
+        replicas_per_stage=replicas_per_stage,
+        replica_devices_map=replica_devices_map,
+    )
+
+    # 7. Detect PD disagg from OmegaConf stage configs
     pd_config = _detect_pd_config_from_omega_conf(stage_configs)
 
-    # ── Resolve async_chunk from stage 0 if not explicit ─────────────
-    if async_chunk is None and resolved_stages:
-        async_chunk = bool(getattr(getattr(stage_configs[0], "engine_args", None), "async_chunk", False))
+    # 8. Resolve async_chunk (explicit CLI → stage 0 fallback → False)
+    async_chunk = _resolve_async_chunk(explicit_async_chunk, resolved_stages, stage_configs)
 
+    # 9. Assemble and return
     return VllmOmniConfig(
         model=model,
         stages=tuple(resolved_stages),
-        async_chunk=bool(async_chunk) if async_chunk is not None else False,
+        async_chunk=async_chunk,
         stage_init_timeout=stage_init_timeout,
         init_timeout=init_timeout,
         shm_threshold_bytes=shm_threshold_bytes,
@@ -448,9 +575,9 @@ def _detect_pd_config_from_omega_conf(
         if pd_pair is None:
             return None
         return {"pd_pair": pd_pair}
-    except Exception as exc:
+    except (ImportError, AttributeError, TypeError) as exc:
         logger = _get_config_logger()
-        logger.warning(
+        logger.debug(
             "[build_vllm_omni_config] PD detection failed: %s. PD disaggregation disabled.",
             exc,
         )

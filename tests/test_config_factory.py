@@ -1696,3 +1696,101 @@ class TestSamplingConstraintsPrecedence:
         assert stages[1].yaml_extras["default_sampling_params"]["stop_token_ids"] == [2150]
         # Deploy temperature still flows through
         assert stages[0].yaml_extras["default_sampling_params"]["temperature"] == 0.4
+
+
+class TestOmniInternalKeysCoverage:
+    """Ensure _OMNI_INTERNAL_KEYS stays in sync with OmniEngineArgs."""
+
+    def test_all_omni_internal_keys_are_omniengineargs_fields(self):
+        """Every key in _OMNI_INTERNAL_KEYS must be a real field on OmniEngineArgs."""
+        try:
+            from vllm_omni.engine.arg_utils import OmniEngineArgs
+        except Exception as exc:
+            pytest.skip(f"OmniEngineArgs not importable: {exc}")
+
+        oe_field_names = {f.name for f in fields(OmniEngineArgs)}
+        missing = {k for k in _OMNI_INTERNAL_KEYS if k not in oe_field_names}
+        assert not missing, (
+            f"_OMNI_INTERNAL_KEYS references fields not on OmniEngineArgs: {sorted(missing)}. "
+            f"Remove stale entries from _OMNI_INTERNAL_KEYS in vllm_omni/config/stage_config.py."
+        )
+
+    def test_omni_engine_args_forwardable_fields_not_in_internal_keys(self):
+        """Fields on OmniEngineArgs that are legitimate per-stage overrides
+        must NOT appear in _OMNI_INTERNAL_KEYS. This test catches fields that
+        were added to OmniEngineArgs but accidentally also added to
+        _OMNI_INTERNAL_KEYS (which would silently block them from being
+        forwarded to per-stage engines).
+
+        The allowlist below documents which OmniEngineArgs fields are
+        intentionally excluded from the check (e.g. helpers, pre-built
+        objects, or fields that ARE orchestration-level).
+        """
+        try:
+            from vllm_omni.engine.arg_utils import OmniEngineArgs
+        except Exception as exc:
+            pytest.skip(f"OmniEngineArgs not importable: {exc}")
+
+        # Fields that are NOT per-stage-forwardable by design.
+        # These either belong to orchestration/metadata/internal plumbing
+        # or are pre-built objects that should never go into engine args.
+        ORCHESTRATION_ONLY: frozenset[str] = frozenset(
+            {
+                # Omni mode switches
+                "omni",
+                "headless",
+                # Orchestrator lifecycle
+                "stage_init_timeout",
+                "init_timeout",
+                # Cross-stage communication
+                "shm_threshold_bytes",
+                "batch_timeout",
+                "async_chunk",
+                # Single-stage / headless
+                "stage_id",
+                "replica_id",
+                "omni_master_address",
+                "omni_master_port",
+                # Config files
+                "stage_configs_path",
+                "deploy_config",
+                "stage_overrides",
+                # Observability
+                "log_stats",
+                "log_file",
+                "enable_diffusion_pipeline_profiler",
+                "enable_ar_profiler",
+                # Output routing
+                "output_modalities",
+                "diffusion_batch_size",
+                "tts_batch_max_items",
+                # Tokenizer (handled by orchestrator forwarding)
+                "tokenizer",
+                # Pre-built objects
+                "parallel_config",
+                # Default sampling
+                "default_sampling_params",
+                "max_generated_image_size",
+                "tts_max_instructions_length",
+                # Worker / cluster
+                "worker_backend",
+                "ray_address",
+            }
+        )
+
+        oe_field_names = {f.name for f in fields(OmniEngineArgs)}
+        forwardable = oe_field_names - ORCHESTRATION_ONLY
+
+        # Any field that is in _OMNI_INTERNAL_KEYS but shouldn't be
+        # (i.e. it's a legitimate per-stage forwardable field).
+        incorrectly_blocked = {
+            f
+            for f in forwardable
+            if f in _OMNI_INTERNAL_KEYS and f not in ("model",)  # model is shared, always forwarded separately
+        }
+        assert not incorrectly_blocked, (
+            f"OmniEngineArgs fields that appear to be per-stage-forwardable but are "
+            f"blocked by _OMNI_INTERNAL_KEYS: {sorted(incorrectly_blocked)}. "
+            f"Either remove them from _OMNI_INTERNAL_KEYS or add them to "
+            f"ORCHESTRATION_ONLY in this test."
+        )

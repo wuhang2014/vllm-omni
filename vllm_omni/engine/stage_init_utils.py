@@ -14,7 +14,7 @@ import multiprocessing as mp
 import os
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from vllm.logger import init_logger
@@ -62,6 +62,28 @@ class LogicalStageInitPlan:
     stage_idx: int
     configured_stage_id: int
     replicas: list[ReplicaInitPlan]
+
+
+@dataclass(frozen=True)
+class ReplicaInitCfgRuntime:
+    """Minimal per-replica runtime info (used instead of OmegaConf roundtrip)."""
+
+    devices: str | None = None
+
+
+@dataclass(frozen=True)
+class ReplicaInitCfg:
+    """Named stub config for replica launch in the unified config path.
+
+    Replaces an anonymous ``type("_ReplicaCfg", ...)()`` call with a proper
+    dataclass that is visible to type-checkers and debuggers.  Provides the
+    attributes that ``_serialize_stage_config`` and single-stage registration
+    need without depending on OmegaConf.
+    """
+
+    stage_id: int
+    stage_type: str
+    runtime: ReplicaInitCfgRuntime = field(default_factory=ReplicaInitCfgRuntime)
 
 
 def _resolve_model_to_local_path(model: str) -> str:

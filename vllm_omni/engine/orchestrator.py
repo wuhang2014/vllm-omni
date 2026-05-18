@@ -136,7 +136,7 @@ class Orchestrator:
         *,
         omni_config: VllmOmniConfig | None = None,
         async_chunk: bool = False,
-        pd_config: dict[str, Any] | None = None,
+        legacy_pd_config: dict[str, Any] | None = None,
     ) -> None:
         self.request_async_queue = request_async_queue
         self.output_async_queue = output_async_queue
@@ -147,17 +147,21 @@ class Orchestrator:
         self.num_stages = len(stage_pools)
         self.stage_pools: list[StagePool] = stage_pools
 
-        # PD disaggregation state
+        # PD disaggregation state — prefer omni_config.pd_config, fall back
+        # to legacy_pd_config for backward compat.
         self._pd_pair: tuple[int, int] | None = None
         self._pd_bootstrap_addr: str | None = None
         self._pd_prefill_engine_id: str | None = None
         self._pd_kv_params: dict[str, Any] = {}
+        effective_pd_config: dict[str, Any] | None = None
         if omni_config is not None and omni_config.pd_config is not None:
-            pd_config = omni_config.pd_config
-        if pd_config is not None:
-            self._pd_pair = pd_config.get("pd_pair")
-            self._pd_bootstrap_addr = pd_config.get("bootstrap_addr")
-            self._pd_prefill_engine_id = pd_config.get("prefill_engine_id")
+            effective_pd_config = omni_config.pd_config
+        elif legacy_pd_config is not None:
+            effective_pd_config = legacy_pd_config
+        if effective_pd_config is not None:
+            self._pd_pair = effective_pd_config.get("pd_pair")
+            self._pd_bootstrap_addr = effective_pd_config.get("bootstrap_addr")
+            self._pd_prefill_engine_id = effective_pd_config.get("prefill_engine_id")
         self.request_states: dict[str, OrchestratorRequestState] = {}
         self._cfg_tracker = CfgCompanionTracker()
 

@@ -790,6 +790,8 @@ class OmniEngineArgs(EngineArgs):
         """
         import json as _json
 
+        # defer import to avoid circular dependency:
+        #   arg_utils → vllm_omni_config → stage_init_utils → arg_utils
         from vllm_omni.config.vllm_omni_config import build_vllm_omni_config
 
         # Use explicit_kwargs() so dataclass defaults don't leak into CLI overrides

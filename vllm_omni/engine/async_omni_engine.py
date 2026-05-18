@@ -77,6 +77,8 @@ from vllm_omni.engine.stage_engine_startup import (
 )
 from vllm_omni.engine.stage_init_utils import (
     LogicalStageInitPlan,
+    ReplicaInitCfg,
+    ReplicaInitCfgRuntime,
     ReplicaInitPlan,
     _inject_inferred_kv_tp_topology,
     acquire_device_locks,
@@ -331,7 +333,17 @@ class AsyncOmniEngine:
             self.num_stages = omni_config.num_stages
             self.async_chunk = omni_config.async_chunk
         else:
-            # Legacy fallback (kept for backward compat until all callers updated)
+            # Legacy fallback (kept for backward compat until all callers updated).
+            # TODO(#3672): Remove legacy path once all callers pass omni_config=.
+            # Tracking: search for AsyncOmniEngine(model=..., engine_args=...)
+            # without omni_config= — should yield zero hits. Deprecation by v0.23.0.
+            import warnings
+
+            warnings.warn(
+                "Legacy stage init path (no omni_config) is deprecated. Pass omni_config= to AsyncOmniEngine.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             self.config_path, self.stage_configs = self._resolve_stage_configs(model, kwargs)
             self.num_stages = len(self.stage_configs)
             self.async_chunk = bool(
@@ -555,23 +567,15 @@ class AsyncOmniEngine:
                             replica_metadata.runtime_cfg = None
 
                     # Build a minimal stage_cfg stub for replica launch
-                    replica_cfg = type(
-                        "_ReplicaCfg",
-                        (),
-                        {
-                            "stage_id": src.stage_id,
-                            "stage_type": src.stage_type,
-                            "runtime": type(
-                                "_Runtime",
-                                (),
-                                {
-                                    "devices": replica_devices_map.get(stage_idx, [None])[replica_id]
-                                    if stage_idx in replica_devices_map
-                                    else None,
-                                },
-                            )(),
-                        },
-                    )()
+                    replica_cfg = ReplicaInitCfg(
+                        stage_id=src.stage_id,
+                        stage_type=src.stage_type,
+                        runtime=ReplicaInitCfgRuntime(
+                            devices=replica_devices_map.get(stage_idx, [None])[replica_id]
+                            if stage_idx in replica_devices_map
+                            else None,
+                        ),
+                    )
 
                     replicas.append(
                         ReplicaInitPlan(
@@ -1273,7 +1277,7 @@ class AsyncOmniEngine:
                 stage_pools=self.stage_pools,
                 omni_config=self.omni_config,
                 async_chunk=self.async_chunk,
-                pd_config=pd_config,
+                legacy_pd_config=pd_config,
             )
             if not startup_future.done():
                 startup_future.set_result(asyncio.get_running_loop())
