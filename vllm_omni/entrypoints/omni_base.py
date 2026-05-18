@@ -142,14 +142,16 @@ class OmniBase(PDDisaggregationMixin):
     ) -> None:
         # Support direct OmniEngineArgs if caller provides one (preferred) or
         # construct from kwargs (backward compat).
+        # Check for removed kwargs before constructing OmniEngineArgs
+        # (otherwise the dataclass constructor raises an opaque TypeError).
+        if "log_requests" in kwargs:
+            raise TypeError("`log_requests` has been removed in Omni/AsyncOmni. Use `log_stats`.")
+
         engine_args: OmniEngineArgs | None = kwargs.pop("engine_args", None)
         if engine_args is not None:
             omni_engine_args = engine_args
         else:
             omni_engine_args = OmniEngineArgs(model=model, **kwargs)
-
-        if "log_requests" in kwargs:
-            raise TypeError("`log_requests` has been removed in Omni/AsyncOmni. Use `log_stats`.")
 
         self._enable_ar_profiler = omni_engine_args.enable_ar_profiler
 

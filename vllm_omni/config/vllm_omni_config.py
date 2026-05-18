@@ -262,7 +262,24 @@ def build_vllm_omni_config(
     )
 
     if not stage_configs:
-        # No pipeline config found — build a default single-stage diffusion config
+        # No pipeline config found — build a default single-stage config.
+        # Default to diffusion only for diffusion/know models; LLM-only
+        # models get an empty config (caller handles the fallback).
+        worker_type = getattr(engine_args, "worker_type", None) if engine_args is not None else None
+        if worker_type in ("ar", "generation", None):
+            # LLM or unknown — return empty config, legacy path handles it
+            return VllmOmniConfig(
+                model=model,
+                async_chunk=False,
+                stage_init_timeout=stage_init_timeout,
+                init_timeout=init_timeout,
+                shm_threshold_bytes=shm_threshold_bytes,
+                batch_timeout=batch_timeout,
+                worker_backend=worker_backend,
+                log_stats=log_stats,
+            )
+
+        # Diffusion fallback
         from omegaconf import OmegaConf
 
         default_cfg = OmegaConf.create(
@@ -341,6 +358,7 @@ def build_vllm_omni_config(
                 stage_cfg,
                 model,
                 stage_connector_spec=stage_connector_spec,
+                cli_tokenizer=getattr(engine_args, "tokenizer", None) if engine_args is not None else None,
             )
             # Inject KV connector
             omni_conn_cfg, omni_from, omni_to = omni_kv_connector

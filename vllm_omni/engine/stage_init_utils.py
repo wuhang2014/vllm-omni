@@ -50,6 +50,9 @@ class ReplicaInitPlan:
     omni_kv_connector: tuple[dict[str, Any] | None, str | None, str | None]
     stage_vllm_config: Any | None = None
     executor_class: type | None = None
+    diffusion_config: Any | None = None
+    """Pre-built ``OmniDiffusionConfig`` for diffusion stages.  When set,
+    diffusion init uses this instead of rebuilding from ``stage_cfg.engine_args``."""
 
 
 @dataclass

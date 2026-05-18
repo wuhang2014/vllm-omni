@@ -38,7 +38,7 @@ from vllm_omni.config.stage_config import strip_parent_engine_args
 from vllm_omni.diffusion.data import DiffusionParallelConfig, parse_attention_config
 from vllm_omni.diffusion.diffusion_engine import supports_audio_output
 from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
-from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
+from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient, create_diffusion_client
 from vllm_omni.diffusion.stage_diffusion_proc import (
     complete_diffusion_handshake,
     spawn_diffusion_proc,
@@ -575,6 +575,7 @@ class AsyncOmniEngine:
                             omni_kv_connector=src.omni_kv_connector,
                             stage_vllm_config=src.vllm_config,
                             executor_class=src.executor_class,
+                            diffusion_config=src.diffusion_config,
                         )
                     )
 
@@ -913,7 +914,9 @@ class AsyncOmniEngine:
                         inject_kv_stage_info(plan.stage_cfg, plan.metadata.stage_id, self.stage_configs)
                         if self.single_stage_mode:
                             assert self._omni_master_server is not None
-                            od_config = build_diffusion_config(self.model, plan.stage_cfg, plan.metadata)
+                            od_config = plan.diffusion_config or build_diffusion_config(
+                                self.model, plan.stage_cfg, plan.metadata
+                            )
                             lock_fds = acquire_diffusion_device_locks(
                                 plan.metadata.stage_id,
                                 od_config,
@@ -951,15 +954,25 @@ class AsyncOmniEngine:
                                 batch_size=self.diffusion_batch_size,
                             )
                         else:
-                            client = initialize_diffusion_stage(
-                                plan.metadata.stage_id,
-                                self.model,
-                                plan.stage_cfg,
-                                plan.metadata,
-                                stage_init_timeout=stage_init_timeout,
-                                batch_size=self.diffusion_batch_size,
-                                use_inline=self.num_stages == 1 and plan.num_replicas == 1,
-                            )
+                            if plan.diffusion_config is not None:
+                                client = create_diffusion_client(
+                                    self.model,
+                                    plan.diffusion_config,
+                                    plan.metadata,
+                                    stage_init_timeout=stage_init_timeout,
+                                    batch_size=self.diffusion_batch_size,
+                                    use_inline=self.num_stages == 1 and plan.num_replicas == 1,
+                                )
+                            else:
+                                client = initialize_diffusion_stage(
+                                    plan.metadata.stage_id,
+                                    self.model,
+                                    plan.stage_cfg,
+                                    plan.metadata,
+                                    stage_init_timeout=stage_init_timeout,
+                                    batch_size=self.diffusion_batch_size,
+                                    use_inline=self.num_stages == 1 and plan.num_replicas == 1,
+                                )
                     finally:
                         if previous_visible_devices is None:
                             current_omni_platform.unset_device_control_env_var()
