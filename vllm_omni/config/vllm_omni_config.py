@@ -262,12 +262,14 @@ def build_vllm_omni_config(
     )
 
     if not stage_configs:
-        # No pipeline config found — build a default single-stage config.
-        # Default to diffusion only for diffusion/know models; LLM-only
-        # models get an empty config (caller handles the fallback).
+        # No pipeline config found — default to single-stage diffusion.
+        # Only skip the diffusion fallback when the caller explicitly asked
+        # for an LLM worker (--worker-type ar/generation).  None means
+        # "not specified" and was the common case for diffusion models
+        # before the unified config — preserve that behaviour.
         worker_type = getattr(engine_args, "worker_type", None) if engine_args is not None else None
-        if worker_type in ("ar", "generation", None):
-            # LLM or unknown — return empty config, legacy path handles it
+        if worker_type in ("ar", "generation"):
+            # Pure LLM — return empty config, legacy path handles it
             return VllmOmniConfig(
                 model=model,
                 async_chunk=False,
