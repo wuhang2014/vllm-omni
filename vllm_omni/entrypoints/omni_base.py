@@ -151,7 +151,10 @@ class OmniBase(PDDisaggregationMixin):
         if engine_args is not None:
             omni_engine_args = engine_args
         else:
-            omni_engine_args = OmniEngineArgs(model=model, **kwargs)
+            # Use from_kwargs which filters to OmniEngineArgs fields only.
+            # vLLM server flags (host, port, subparser, ssl_*, api_key, …)
+            # are silently dropped — they are consumed by the FastAPI layer.
+            omni_engine_args = OmniEngineArgs.from_kwargs(model=model, **kwargs)
 
         self._enable_ar_profiler = omni_engine_args.enable_ar_profiler
 

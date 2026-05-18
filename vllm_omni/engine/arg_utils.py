@@ -590,6 +590,24 @@ class OmniEngineArgs(EngineArgs):
         ea._explicit_fields = frozenset(explicit.keys())
         return ea
 
+    @classmethod
+    def from_kwargs(cls, model: str, **kwargs: Any) -> OmniEngineArgs:
+        """Build ``OmniEngineArgs`` from a mixed kwargs dict (offline path).
+
+        Filters *kwargs* to only fields declared on ``OmniEngineArgs``,
+        so that vLLM server flags (host, port, subparser, api_key, …)
+        and other non-Omni keys are silently dropped.  This replaces the
+        old ``split_kwargs`` partitioning.
+
+        Does NOT set ``_explicit_fields`` — callers that need explicit-
+        field tracking should use :meth:`from_cli_args` or :meth:`create`.
+        """
+        import dataclasses as _dc
+
+        oe_fields = {f.name for f in _dc.fields(cls)}
+        oe_kwargs = {k: v for k, v in kwargs.items() if k in oe_fields}
+        return cls(model=model, **oe_kwargs)
+
     def explicit_kwargs(self) -> dict[str, Any]:
         """Return only the fields explicitly set by the caller."""
         explicit = getattr(self, "_explicit_fields", None)
