@@ -216,12 +216,8 @@ class OmniBase(PDDisaggregationMixin):
     @property
     def stage_configs(self) -> list:
         """Expose stage configs for PD disaggregation detection and validation.
-
-        Returns ``omni_config.stages`` when the unified config path is active,
-        falling back to ``engine.stage_configs`` (OmegaConf) otherwise.
+        Returns the OmegaConf stage config list for backward compat.
         """
-        if self.omni_config is not None and self.omni_config.num_stages > 0:
-            return list(self.omni_config.stages)
         return self.engine.stage_configs
 
     def _has_dead_stage(self) -> bool:

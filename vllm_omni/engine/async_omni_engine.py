@@ -322,7 +322,12 @@ class AsyncOmniEngine:
         # Resolve stage configs from omni_config (new unified path)
         if omni_config is not None:
             self.config_path = None
-            self.stage_configs = []  # legacy compat — replaced by omni_config.stages downstream
+            # Use OmegaConf list for backward compat (serving_speech.py, pd_utils.py,
+            # api_server is_pure_diffusion check, etc. access stage.engine_args.*).
+            # The new init path uses omni_config.stages (StageResolvedConfig) internally.
+            self.stage_configs = (
+                list(omni_config.legacy_stage_configs) if omni_config.legacy_stage_configs is not None else []
+            )
             self.num_stages = omni_config.num_stages
             self.async_chunk = omni_config.async_chunk
         else:

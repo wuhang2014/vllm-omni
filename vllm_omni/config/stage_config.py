@@ -58,6 +58,18 @@ _OMNI_INTERNAL_KEYS: frozenset[str] = frozenset(
         "replica_id",
         "omni_master_address",
         "omni_master_port",
+        # ── Per-stage pipeline fields (set in deploy YAML, not global CLI) ──
+        "model_stage",
+        "model_arch",
+        "engine_output_type",
+        "hf_config_name",
+        "custom_process_next_stage_input_func",
+        "worker_type",
+        "task_type",
+        "worker_cls",
+        "has_sampling_extra_args",
+        "custom_pipeline_args",
+        "enable_sleep_mode",
         # ── Orchestrator communication ──
         "shm_threshold_bytes",
         "batch_timeout",

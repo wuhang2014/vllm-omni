@@ -155,6 +155,13 @@ class VllmOmniConfig:
     omni_transfer_config: Any = None
     """Loaded omni transfer config (connector definitions for KV transfer)."""
 
+    legacy_stage_configs: Any = None
+    """Original OmegaConf stage configs from ``load_stage_configs_from_model``.
+    Preserved for backward-compat with code that accesses OmegaConf attributes
+    (``stage.engine_args.model_stage``, ``stage.is_prefill_only``, etc.) via
+    :attr:`OmniBase.stage_configs`.  Not used by the new init path.
+    """
+
     # ── Prompt expansion ───────────────────────────────────────────
 
     prompt_expand_func: Callable[..., Any] | None = None
@@ -421,6 +428,7 @@ def build_vllm_omni_config(
         pd_config=pd_config,
         omni_transfer_config=omni_transfer_config,
         prompt_expand_func=prompt_expand_func,
+        legacy_stage_configs=stage_configs,
     )
 
 
