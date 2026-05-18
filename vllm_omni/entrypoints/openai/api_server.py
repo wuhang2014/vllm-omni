@@ -87,6 +87,7 @@ from vllm.utils import random_uuid
 from vllm.utils.system_utils import decorate_logs
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
+from vllm_omni.engine.arg_utils import OmniEngineArgs
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.openai.errors import InvalidInputReferenceError
 from vllm_omni.entrypoints.openai.image_api_utils import (
@@ -529,9 +530,13 @@ async def build_async_omni_from_stage_config(
     async_omni: EngineClient | None = None
 
     try:
-        kwargs = vars(args).copy()
-        kwargs.pop("model", None)
-        async_omni = AsyncOmni(model=args.model, **kwargs)
+        # Build OmniEngineArgs from the nullified CLI namespace so
+        # dataclass defaults (e.g. model_stage="thinker") do not
+        # leak as per-stage overrides.  from_cli_args tracks
+        # _explicit_fields which create_omni_config uses to
+        # distinguish user-typed flags from defaults.
+        omni_engine_args = OmniEngineArgs.from_cli_args(args)
+        async_omni = AsyncOmni(model=args.model, engine_args=omni_engine_args)
 
         # # Don't keep the dummy data in memory
         # await async_llm.reset_mm_cache()
