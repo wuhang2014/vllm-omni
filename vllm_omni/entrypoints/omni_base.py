@@ -97,13 +97,17 @@ OutputMessageHandleResult = tuple[Literal[True], None, None, None] | tuple[Liter
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """Recursively merge *override* into *base*; override keys win."""
+    """Recursively merge *override* into *base*; override keys win.
+
+    Stage IDs are normalised to strings to avoid duplicate keys when
+    callers provide integer keys alongside YAML's string keys."""
     result = dict(base)
     for key, val in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
-            result[key] = _deep_merge(result[key], val)
+        key_str = str(key)
+        if key_str in result and isinstance(result[key_str], dict) and isinstance(val, dict):
+            result[key_str] = _deep_merge(result[key_str], val)
         else:
-            result[key] = val
+            result[key_str] = val
     return result
 
 

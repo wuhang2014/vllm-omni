@@ -643,18 +643,30 @@ class OmniArgumentParser(FlexibleArgumentParser):
         if args is None:
             args = sys.argv[1:]
 
-        # Skip model detection for help/version — avoid unnecessary HF downloads
-        if not self._is_help_or_version(args):
-            model = self._peek_model(args)
+        # Clear stale state from a previous parse_args() call (fixes P4).
+        self._yaml_stage_overrides = None
+
+        # Gate: only inject defaults for "serve" subcommand or flat-parser
+        # mode (api_server direct launch).  Avoids unnecessary HF config
+        # fetches for unrelated subcommands like "bench" (fixes P3).
+        if self._is_serve_or_flat(args) and not self._is_help_or_version(args):
+            # Use flat-parser peek when there are no subparsers (api_server),
+            # otherwise use the standard serve-subcommand peek.
+            if self._subparsers is None:
+                model = self._peek_model_flat(args)
+            else:
+                model = self._peek_model(args)
             if model:
                 stage_id = self._peek_stage_id(args)
                 self._inject_model_defaults(model, stage_id)
 
         result = super().parse_args(args, namespace)
 
-        # Post-parse: deep-merge stashed YAML stage_overrides with user value
+        # Post-parse: deep-merge stashed YAML stage_overrides with user value.
+        # Only apply when stage_overrides is present in the parsed namespace
+        # and we actually stashed yaml defaults (fixes P4).
         yaml_overrides = getattr(self, "_yaml_stage_overrides", None)
-        if yaml_overrides is not None:
+        if yaml_overrides is not None and hasattr(result, "stage_overrides"):
             user_raw = getattr(result, "stage_overrides", None)
             if user_raw:
                 user_overrides = json.loads(user_raw) if isinstance(user_raw, str) else user_raw
@@ -674,23 +686,34 @@ class OmniArgumentParser(FlexibleArgumentParser):
                 return True
         return False
 
+    def _is_serve_or_flat(self, args: list[str]) -> bool:
+        """True when injection should proceed: ``serve`` subcommand or flat-parser (api_server)."""
+        if self._subparsers is None:
+            return True
+        return bool(args) and args[0] == "serve"
+
     @classmethod
     def _peek_model(cls, args: list[str]) -> str | None:
         """Extract model from raw CLI args before full preprocessing.
 
-        Handles the three cases FlexibleArgumentParser handles:
-        1. --config config.yaml → reads yaml['model']
+        Handles the cases FlexibleArgumentParser handles:
+        1. --config config.yaml / --config=config.yaml → reads yaml['model']
         2. --model foo/bar → promoted to positional by FlexibleArgumentParser
         3. vllm serve foo/bar → first positional after subcommand
+        4. python -m ...api_server foo/bar → first positional (flat parser)
         """
         current = list(args)
 
-        # Case 1: --config YAML
-        if "--config" in current:
-            idx = current.index("--config")
-            if idx + 1 < len(current):
+        # Case 1: --config YAML (both --config <path> and --config=<path>)
+        for i, arg in enumerate(current):
+            path: str | None = None
+            if arg == "--config" and i + 1 < len(current):
+                path = current[i + 1]
+            elif arg.startswith("--config="):
+                path = arg.split("=", 1)[1]
+            if path:
                 try:
-                    with open(current[idx + 1]) as fh:
+                    with open(path) as fh:
                         cfg = yaml.safe_load(fh)
                     if isinstance(cfg, dict) and cfg.get("model"):
                         return cfg["model"]
@@ -709,6 +732,13 @@ class OmniArgumentParser(FlexibleArgumentParser):
             if not current[1].startswith("-"):
                 return current[1]
 
+        return None
+
+    def _peek_model_flat(self, args: list[str]) -> str | None:
+        """Peek model for flat-parser mode (no subparsers — api_server direct launch)."""
+        current = list(args)
+        if current and not current[0].startswith("-"):
+            return current[0]
         return None
 
     @staticmethod
