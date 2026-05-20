@@ -96,6 +96,88 @@ def omni_snapshot_download(model_id: str) -> str:
 OutputMessageHandleResult = tuple[Literal[True], None, None, None] | tuple[Literal[False], str, int, ClientRequestState]
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge *override* into *base*; override keys win."""
+    result = dict(base)
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
+
+
+def _inject_deploy_defaults(model: str, kwargs: dict[str, Any]) -> None:
+    """Inject model-specific defaults from deploy YAML into *kwargs* in place.
+
+    Pipeline-wide ``DeployConfig`` fields and (for headless) per-stage
+    ``StageDeployConfig`` fields are set via ``setdefault`` so explicit
+    user-supplied values always win.  For normal serve, per-stage defaults
+    are deep-merged into ``stage_overrides``.
+    """
+    import json as _json
+    from dataclasses import fields as dc_fields
+
+    from vllm_omni.config.stage_config import (
+        _DEPLOY_DIR,
+        DeployConfig,
+        StageConfigFactory,
+        StageDeployConfig,
+        load_deploy_config,
+    )
+
+    model_type, _hf_config = StageConfigFactory._auto_detect_model_type(model)
+    if not model_type:
+        return
+
+    deploy_path = _DEPLOY_DIR / f"{model_type}.yaml"
+    if not deploy_path.exists():
+        return
+
+    deploy = load_deploy_config(deploy_path)
+
+    # Pipeline-wide: fill missing from DeployConfig
+    for f in dc_fields(DeployConfig):
+        val = getattr(deploy, f.name)
+        if val is not None:
+            kwargs.setdefault(f.name, val)
+
+    # Per-stage
+    stage_id = kwargs.get("stage_id")
+    if stage_id is not None:
+        # Headless: fill per-stage kwargs directly
+        stage_dep = next((s for s in deploy.stages if s.stage_id == stage_id), None)
+        if stage_dep:
+            for f in dc_fields(StageDeployConfig):
+                if f.name == "engine_extras":
+                    continue
+                val = getattr(stage_dep, f.name)
+                if val is not None:
+                    kwargs.setdefault(f.name, val)
+    else:
+        # Normal serve: collapse all stages into stage_overrides dict
+        overrides: dict[str, dict[str, Any]] = {}
+        for stage in deploy.stages:
+            d: dict[str, Any] = {}
+            for f in dc_fields(StageDeployConfig):
+                if f.name == "engine_extras":
+                    continue
+                val = getattr(stage, f.name)
+                if val is not None:
+                    d[f.name] = val
+            if d:
+                overrides[str(stage.stage_id)] = d
+
+        if overrides:
+            existing = kwargs.get("stage_overrides")
+            if existing:
+                if isinstance(existing, str):
+                    existing = _json.loads(existing)
+                kwargs["stage_overrides"] = _json.dumps(_deep_merge(overrides, existing), sort_keys=True)
+            else:
+                kwargs["stage_overrides"] = _json.dumps(overrides, sort_keys=True)
+
+
 class OmniBase(PDDisaggregationMixin):
     """Shared runtime foundation for AsyncOmni and Omni."""
 
@@ -158,6 +240,14 @@ class OmniBase(PDDisaggregationMixin):
 
         if "log_requests" in kwargs:
             raise TypeError("`log_requests` has been removed in Omni/AsyncOmni. Use `log_stats`.")
+
+        # Inject model-specific defaults from deploy YAML into remaining kwargs.
+        # Pipeline-wide DeployConfig fields and (for headless) per-stage
+        # StageDeployConfig fields are set via kwargs.setdefault so explicit
+        # user-supplied values always win.  For normal serve, per-stage defaults
+        # are deep-merged into stage_overrides.
+        _inject_deploy_defaults(model, kwargs)
+
         model = omni_snapshot_download(model)
         self.__dict__["_name"] = self.__class__.__name__
         self.model = model

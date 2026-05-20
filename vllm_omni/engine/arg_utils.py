@@ -2,12 +2,15 @@ import argparse
 import dataclasses
 import json
 import os
+import sys
 import tempfile
 from dataclasses import dataclass, field, fields
 from typing import Any
 
+import yaml
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.logger import init_logger
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from vllm_omni.config import OmniModelConfig
 from vllm_omni.engine.output_modality import OutputModality
@@ -606,10 +609,227 @@ def orchestrator_args_from_argparse(args: Any) -> OrchestratorArgs:
     return OrchestratorArgs(**kwargs)
 
 
+# ============================================================================
+# OmniArgumentParser — model-aware default injection
+# ============================================================================
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge *override* into *base*; override keys win."""
+    result = dict(base)
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
+
+
+class OmniArgumentParser(FlexibleArgumentParser):
+    """FlexibleArgumentParser that injects model-specific defaults from deploy YAML.
+
+    On ``parse_args()``, peeks the model from raw ``sys.argv``, detects its
+    ``model_type`` via HuggingFace config, loads the corresponding
+    ``deploy/<model_type>.yaml``, and sets YAML values as ``action.default`` on
+    the serve subparser.  Argparse then uses these as fallback values — any
+    explicit CLI flag typed by the user naturally takes precedence.
+
+    Per-stage fields in normal-serve mode are collapsed into a JSON default on
+    ``--stage-overrides`` and deep-merged post-parse with any user-supplied
+    ``--stage-overrides`` value.
+    """
+
+    def parse_args(self, args: list[str] | None = None, namespace: argparse.Namespace | None = None):
+        if args is None:
+            args = sys.argv[1:]
+
+        # Skip model detection for help/version — avoid unnecessary HF downloads
+        if not self._is_help_or_version(args):
+            model = self._peek_model(args)
+            if model:
+                stage_id = self._peek_stage_id(args)
+                self._inject_model_defaults(model, stage_id)
+
+        result = super().parse_args(args, namespace)
+
+        # Post-parse: deep-merge stashed YAML stage_overrides with user value
+        yaml_overrides = getattr(self, "_yaml_stage_overrides", None)
+        if yaml_overrides is not None:
+            user_raw = getattr(result, "stage_overrides", None)
+            if user_raw:
+                user_overrides = json.loads(user_raw) if isinstance(user_raw, str) else user_raw
+                merged = _deep_merge(yaml_overrides, user_overrides)
+            else:
+                merged = yaml_overrides
+            setattr(result, "stage_overrides", json.dumps(merged, sort_keys=True))
+
+        return result
+
+    # ── Peek helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_help_or_version(args: list[str]) -> bool:
+        for a in args:
+            if a in ("--help", "-h", "--version", "-v") or a.startswith("--help="):
+                return True
+        return False
+
+    @classmethod
+    def _peek_model(cls, args: list[str]) -> str | None:
+        """Extract model from raw CLI args before full preprocessing.
+
+        Handles the three cases FlexibleArgumentParser handles:
+        1. --config config.yaml → reads yaml['model']
+        2. --model foo/bar → promoted to positional by FlexibleArgumentParser
+        3. vllm serve foo/bar → first positional after subcommand
+        """
+        current = list(args)
+
+        # Case 1: --config YAML
+        if "--config" in current:
+            idx = current.index("--config")
+            if idx + 1 < len(current):
+                try:
+                    with open(current[idx + 1]) as fh:
+                        cfg = yaml.safe_load(fh)
+                    if isinstance(cfg, dict) and cfg.get("model"):
+                        return cfg["model"]
+                except Exception:
+                    pass
+
+        # Case 2: --model flag
+        for i, arg in enumerate(current):
+            if arg == "--model" and i + 1 < len(current):
+                return current[i + 1]
+            if arg.startswith("--model="):
+                return arg.split("=", 1)[1]
+
+        # Case 3: positional model for "serve" subcommand
+        if current and current[0] == "serve" and len(current) > 1:
+            if not current[1].startswith("-"):
+                return current[1]
+
+        return None
+
+    @staticmethod
+    def _peek_stage_id(args: list[str]) -> int | None:
+        for i, arg in enumerate(args):
+            if arg == "--stage-id" and i + 1 < len(args):
+                try:
+                    return int(args[i + 1])
+                except (ValueError, IndexError):
+                    pass
+            if arg.startswith("--stage-id="):
+                try:
+                    return int(arg.split("=", 1)[1])
+                except ValueError:
+                    pass
+        return None
+
+    # ── Default injection ───────────────────────────────────────────────────
+
+    def _inject_model_defaults(self, model: str, stage_id: int | None) -> None:
+        """Load deploy YAML and set ``action.default`` on the serve subparser."""
+        from dataclasses import fields as dc_fields
+
+        from vllm_omni.config.stage_config import (
+            _DEPLOY_DIR,
+            DeployConfig,
+            StageConfigFactory,
+            StageDeployConfig,
+            load_deploy_config,
+        )
+
+        model_type, _hf_config = StageConfigFactory._auto_detect_model_type(model)
+        if not model_type:
+            return
+
+        deploy_path = _DEPLOY_DIR / f"{model_type}.yaml"
+        if not deploy_path.exists():
+            return
+
+        deploy = load_deploy_config(deploy_path)
+        serve_parser = self._get_serve_subparser()
+        if serve_parser is None:
+            if self._subparsers is None:
+                serve_parser = self  # flat-parser mode (api_server direct invocation)
+            else:
+                return
+
+        # ── Pipeline-wide: DeployConfig fields → action.default ──
+        for f in dc_fields(DeployConfig):
+            val = getattr(deploy, f.name)
+            if val is not None:
+                self._set_action_default(serve_parser, f.name, val)
+
+        # ── Per-stage ──
+        if stage_id is not None:
+            # Headless: set per-stage action.defaults directly
+            stage_dep = next((s for s in deploy.stages if s.stage_id == stage_id), None)
+            if stage_dep:
+                for f in dc_fields(StageDeployConfig):
+                    if f.name == "engine_extras":
+                        continue
+                    val = getattr(stage_dep, f.name)
+                    if val is not None:
+                        self._set_action_default(serve_parser, f.name, val)
+        else:
+            # Normal serve: collapse all stages into stage_overrides JSON
+            stage_overrides: dict[str, dict[str, Any]] = {}
+            for stage in deploy.stages:
+                d: dict[str, Any] = {}
+                for f in dc_fields(StageDeployConfig):
+                    if f.name == "engine_extras":
+                        continue
+                    val = getattr(stage, f.name)
+                    if val is not None:
+                        d[f.name] = val
+                if d:
+                    stage_overrides[str(stage.stage_id)] = d
+
+            if stage_overrides:
+                yaml_json = json.dumps(stage_overrides, sort_keys=True)
+                self._set_action_default(serve_parser, "stage_overrides", yaml_json)
+                self._yaml_stage_overrides = stage_overrides
+
+    @staticmethod
+    def _set_action_default(parser: argparse.ArgumentParser, dest: str, value: Any) -> None:
+        for action in parser._actions:
+            if action.dest == dest:
+                action.default = value
+                break
+
+    def _get_serve_subparser(self) -> argparse.ArgumentParser | None:
+        if self._subparsers is None:
+            return None
+        subparsers_action = self._subparsers._group_actions[0]
+        return subparsers_action.choices.get("serve")
+
+
+# ============================================================================
+# End OmniArgumentParser
+# ============================================================================
+
+
 def nullify_stage_engine_defaults(parser: argparse.ArgumentParser) -> None:
     """Reset stage-level engine flag defaults to ``None``; preserve real
     default in help text. Only deploy-YAML override fields are touched.
-    Idempotent."""
+    Idempotent.
+
+    .. deprecated::
+        Use :class:`OmniArgumentParser` instead — it injects model-specific
+        defaults from deploy YAML directly as argparse defaults, eliminating
+        the need for nullify-then-refill.
+    """
+    import warnings
+
+    warnings.warn(
+        "nullify_stage_engine_defaults is deprecated. "
+        "Use OmniArgumentParser instead, which injects model-specific "
+        "defaults from deploy YAML directly.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     from vllm_omni.config.stage_config import deploy_override_field_names
 
     override_dests = deploy_override_field_names()

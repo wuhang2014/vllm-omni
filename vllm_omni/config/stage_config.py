@@ -753,7 +753,22 @@ _PIPELINE_WIDE_ENGINE_FIELDS: tuple[str, ...] = (
 
 
 def deploy_override_field_names() -> frozenset[str]:
-    """Return deploy-schema fields whose CLI defaults must not override YAML."""
+    """Return deploy-schema fields whose CLI defaults must not override YAML.
+
+    .. deprecated::
+        ``OmniArgumentParser`` and ``_inject_deploy_defaults`` now inject
+        model-specific defaults from deploy YAML by iterating dataclass
+        ``fields()`` dynamically — no hardcoded field set is needed.
+    """
+    import warnings
+
+    warnings.warn(
+        "deploy_override_field_names is deprecated. "
+        "OmniArgumentParser and _inject_deploy_defaults use dataclass "
+        "fields() iteration instead — no hardcoded field set is needed.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return (
         frozenset(_STAGE_DEPLOY_FIELDS)
         | frozenset(_PIPELINE_WIDE_ENGINE_FIELDS)

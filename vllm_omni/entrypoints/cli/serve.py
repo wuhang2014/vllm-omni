@@ -21,7 +21,6 @@ from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-from vllm_omni.engine.arg_utils import nullify_stage_engine_defaults
 from vllm_omni.entrypoints.cli.logo import log_logo
 from vllm_omni.entrypoints.openai.api_server import omni_run_server
 
@@ -654,7 +653,6 @@ class OmniServeCommand(CLISubcommand):
         # sandboxed globals dict via ``DummySelf``) doesn't fail on a NameError.
         type(self)._parser = serve_parser
 
-        nullify_stage_engine_defaults(serve_parser)
         return serve_parser
 
 
