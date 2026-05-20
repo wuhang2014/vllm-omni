@@ -658,7 +658,8 @@ class OmniArgumentParser(FlexibleArgumentParser):
                 model = self._peek_model(args)
             if model:
                 stage_id = self._peek_stage_id(args)
-                self._inject_model_defaults(model, stage_id)
+                deploy_config_path = self._peek_deploy_config(args)
+                self._inject_model_defaults(model, stage_id, deploy_config_path=deploy_config_path)
 
         result = super().parse_args(args, namespace)
 
@@ -756,11 +757,29 @@ class OmniArgumentParser(FlexibleArgumentParser):
                     pass
         return None
 
+    @staticmethod
+    def _peek_deploy_config(args: list[str]) -> str | None:
+        """Peek --deploy-config from raw argv (supports both --deploy-config <p> and --deploy-config=<p>)."""
+        for i, arg in enumerate(args):
+            if arg == "--deploy-config" and i + 1 < len(args):
+                return args[i + 1]
+            if arg.startswith("--deploy-config="):
+                return arg.split("=", 1)[1]
+        return None
+
     # ── Default injection ───────────────────────────────────────────────────
 
-    def _inject_model_defaults(self, model: str, stage_id: int | None) -> None:
-        """Load deploy YAML and set ``action.default`` on the serve subparser."""
+    def _inject_model_defaults(
+        self, model: str, stage_id: int | None, *, deploy_config_path: str | None = None
+    ) -> None:
+        """Load deploy YAML and set ``action.default`` on the serve subparser.
+
+        If *deploy_config_path* is given (from ``--deploy-config``), that file
+        is used directly.  Otherwise the per-model ``deploy/<model_type>.yaml``
+        is resolved from the HuggingFace config.
+        """
         from dataclasses import fields as dc_fields
+        from pathlib import Path
 
         from vllm_omni.config.stage_config import (
             _DEPLOY_DIR,
@@ -770,13 +789,17 @@ class OmniArgumentParser(FlexibleArgumentParser):
             load_deploy_config,
         )
 
-        model_type, _hf_config = StageConfigFactory._auto_detect_model_type(model)
-        if not model_type:
-            return
-
-        deploy_path = _DEPLOY_DIR / f"{model_type}.yaml"
-        if not deploy_path.exists():
-            return
+        if deploy_config_path:
+            deploy_path = Path(deploy_config_path)
+            if not deploy_path.exists():
+                return
+        else:
+            model_type, _hf_config = StageConfigFactory._auto_detect_model_type(model)
+            if not model_type:
+                return
+            deploy_path = _DEPLOY_DIR / f"{model_type}.yaml"
+            if not deploy_path.exists():
+                return
 
         deploy = load_deploy_config(deploy_path)
         serve_parser = self._get_serve_subparser()

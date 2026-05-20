@@ -118,9 +118,14 @@ def _inject_deploy_defaults(model: str, kwargs: dict[str, Any]) -> None:
     ``StageDeployConfig`` fields are set via ``setdefault`` so explicit
     user-supplied values always win.  For normal serve, per-stage defaults
     are deep-merged into ``stage_overrides``.
+
+    If *kwargs* contains ``deploy_config`` (from ``--deploy-config``), that
+    file is used directly.  Otherwise ``deploy/<model_type>.yaml`` is
+    resolved from the HuggingFace config.
     """
     import json as _json
     from dataclasses import fields as dc_fields
+    from pathlib import Path
 
     from vllm_omni.config.stage_config import (
         _DEPLOY_DIR,
@@ -130,13 +135,18 @@ def _inject_deploy_defaults(model: str, kwargs: dict[str, Any]) -> None:
         load_deploy_config,
     )
 
-    model_type, _hf_config = StageConfigFactory._auto_detect_model_type(model)
-    if not model_type:
-        return
-
-    deploy_path = _DEPLOY_DIR / f"{model_type}.yaml"
-    if not deploy_path.exists():
-        return
+    deploy_config_path = kwargs.get("deploy_config")
+    if deploy_config_path:
+        deploy_path = Path(deploy_config_path)
+        if not deploy_path.exists():
+            return
+    else:
+        model_type, _hf_config = StageConfigFactory._auto_detect_model_type(model)
+        if not model_type:
+            return
+        deploy_path = _DEPLOY_DIR / f"{model_type}.yaml"
+        if not deploy_path.exists():
+            return
 
     deploy = load_deploy_config(deploy_path)
 
