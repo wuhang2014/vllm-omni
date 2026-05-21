@@ -100,6 +100,21 @@ class StageResolvedConfig:
     prompt_expand_func: Callable[..., Any] | None = None
     """Optional function that expands a prompt before stage submission."""
 
+    # ── PD disaggregation (from deploy YAML) ───────────────────────
+
+    is_prefill_only: bool = False
+    """True when this stage is a dedicated prefill-only stage (PD disagg)."""
+
+    is_decode_only: bool = False
+    """True when this stage is a dedicated decode-only stage (PD disagg)."""
+
+    @property
+    def engine_input_source(self) -> list[int]:
+        """Delegate to :attr:`metadata.engine_input_source` for PD detection compat."""
+        if self.metadata is not None:
+            return self.metadata.engine_input_source
+        return []
+
 
 # ---------------------------------------------------------------------------
 # Ad-hoc config stubs (replaces anonymous type() calls)
@@ -174,13 +189,6 @@ class VllmOmniConfig:
 
     omni_transfer_config: Any = None
     """Loaded omni transfer config (connector definitions for KV transfer)."""
-
-    legacy_stage_configs: Any = None
-    """Original OmegaConf stage configs from ``load_stage_configs_from_model``.
-    Preserved for backward-compat with code that accesses OmegaConf attributes
-    (``stage.engine_args.model_stage``, ``stage.is_prefill_only``, etc.) via
-    :attr:`OmniBase.stage_configs`.  Not used by the new init path.
-    """
 
     # ── Prompt expansion ───────────────────────────────────────────
 
@@ -413,6 +421,8 @@ def _resolve_stages(
                 stage_connector_spec=stage_connector_spec,
                 omni_kv_connector=omni_kv_connector,
                 prompt_expand_func=prompt_expand_func,
+                is_prefill_only=getattr(stage_cfg, "is_prefill_only", False),
+                is_decode_only=getattr(stage_cfg, "is_decode_only", False),
             )
         )
 
@@ -535,8 +545,8 @@ def build_vllm_omni_config(
         replica_devices_map=replica_devices_map,
     )
 
-    # 7. Detect PD disagg from OmegaConf stage configs
-    pd_config = _detect_pd_config_from_omega_conf(stage_configs)
+    # 7. Detect PD disagg from resolved stage configs
+    pd_config = _detect_pd_config_from_resolved_stages(resolved_stages)
 
     # 8. Resolve async_chunk (explicit CLI → stage 0 fallback → False)
     async_chunk = _resolve_async_chunk(explicit_async_chunk, resolved_stages, stage_configs)
@@ -555,23 +565,32 @@ def build_vllm_omni_config(
         pd_config=pd_config,
         omni_transfer_config=omni_transfer_config,
         prompt_expand_func=prompt_expand_func,
-        legacy_stage_configs=stage_configs,
     )
 
 
-def _detect_pd_config_from_omega_conf(
-    stage_configs: list,
+def _detect_pd_config_from_resolved_stages(
+    resolved_stages: list[StageResolvedConfig],
 ) -> dict[str, Any] | None:
-    """Detect PD disaggregation from the original OmegaConf stage configs.
+    """Detect PD disaggregation from resolved ``StageResolvedConfig`` objects.
 
-    OmegaConf objects carry ``is_prefill_only`` / ``is_decode_only`` flags
-    that ``StageResolvedConfig`` does not expose.  Use them here so PD
-    disagg survives the move to the unified config path.
+    ``StageResolvedConfig`` now carries ``is_prefill_only`` / ``is_decode_only``
+    directly (populated from the deploy YAML), so we can build minimal
+    wrappers for ``PDDisaggregationMixin.detect_pd_separation_from_stage_configs``
+    without depending on OmegaConf.
     """
     try:
         from vllm_omni.entrypoints.pd_utils import PDDisaggregationMixin
 
-        pd_pair = PDDisaggregationMixin.detect_pd_separation_from_stage_configs(stage_configs)
+        # Build lightweight wrappers that expose the PD flags
+        class _PDWrapper:
+            def __init__(self, s: StageResolvedConfig):
+                self.stage_id = s.stage_id
+                self.is_prefill_only = s.is_prefill_only
+                self.is_decode_only = s.is_decode_only
+                self.engine_input_source = s.metadata.engine_input_source if s.metadata else []
+
+        wrappers = [_PDWrapper(s) for s in resolved_stages]
+        pd_pair = PDDisaggregationMixin.detect_pd_separation_from_stage_configs(wrappers)
         if pd_pair is None:
             return None
         return {"pd_pair": pd_pair}

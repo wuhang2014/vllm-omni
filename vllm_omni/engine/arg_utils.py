@@ -161,6 +161,17 @@ class OmniEngineArgs(EngineArgs):
     omni_master_port: int | None = None
     """Port of the Omni orchestrator (master)."""
 
+    # ── OmniCoordinator integration ─────────────────────────────────
+
+    omni_dp_size_local: int = 1
+    """Process-local data-parallel size for OmniCoordinator."""
+
+    omni_lb_policy: str = "random"
+    """Load-balancing policy used by OmniCoordinator."""
+
+    omni_heartbeat_timeout: float = 30.0
+    """Heartbeat timeout in seconds for OmniCoordinator."""
+
     # ── Observability ──────────────────────────────────────────────
 
     log_stats: bool = False
@@ -465,6 +476,16 @@ class OmniEngineArgs(EngineArgs):
         group.add_argument("--replica-id", type=int, default=0, help="Replica id for headless mode.")
         group.add_argument("--omni-master-address", "-oma", type=str, default=None, help="Omni orchestrator address.")
         group.add_argument("--omni-master-port", "-omp", type=int, default=None, help="Omni orchestrator port.")
+
+        # ── OmniCoordinator ──
+        group.add_argument(
+            "--omni-dp-size-local",
+            type=int,
+            default=1,
+            help="Process-local DP size for OmniCoordinator.",
+        )
+        group.add_argument("--omni-lb-policy", type=str, default="random", help="Load-balancing policy.")
+        group.add_argument("--omni-heartbeat-timeout", type=float, default=30.0, help="Heartbeat timeout (seconds).")
 
         # ── Observability ──
         group.add_argument("--log-stats", action="store_true", help="Enable per-request pipeline metrics.")

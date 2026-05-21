@@ -131,6 +131,11 @@ class PDDisaggregationMixin:
         p_stage = self.stage_configs[p_id]
         d_stage = self.stage_configs[d_id]
 
+        # Skip engine_args-based validation for StageResolvedConfig (new unified path).
+        # PD config consistency is validated during deploy YAML merge.
+        if not hasattr(p_stage, "engine_args"):
+            return
+
         def _get_kv_cfg(stage: "OmniStage") -> dict[str, Any]:
             ea = stage.engine_args
             cfg = getattr(ea, "kv_transfer_config", None)
