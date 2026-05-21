@@ -412,3 +412,28 @@ class TestInjectModelDefaults:
         args = parser.parse_args(["serve", "Qwen/Qwen2.5-Omni-7B", "--stage-id", "0"])
         assert args.gpu_memory_utilization == 0.5
         assert args.enforce_eager is True
+
+
+# ===========================================================================
+# G — Edge cases: model_type detection fails, malformed YAML
+# ===========================================================================
+
+
+class TestEdgeCases:
+    def test_model_type_detection_returns_none(self, mocker, tmp_path, mock_model_detection):
+        """When _auto_detect_model_type returns (None, None), injection is skipped cleanly."""
+        mocker.patch(
+            "vllm_omni.config.stage_config.StageConfigFactory._auto_detect_model_type",
+            return_value=(None, None),
+        )
+        parser = _make_serve_parser()
+        args = parser.parse_args(["serve", "Qwen/Qwen2.5-Omni-7B", "--dtype", "float32"])
+        assert args.dtype == "float32"  # user value used, no crash
+
+    def test_malformed_deploy_yaml_noop(self, mocker, tmp_path, mock_model_detection):
+        """Malformed deploy YAML is caught gracefully — injection skipped, no crash."""
+        yaml = tmp_path / "test_model.yaml"
+        yaml.write_text("{ invalid: yaml: content: [")  # malformed YAML
+        parser = _make_serve_parser()
+        args = parser.parse_args(["serve", "Qwen/Qwen2.5-Omni-7B", "--dtype", "float32"])
+        assert args.dtype == "float32"  # no crash, user value used

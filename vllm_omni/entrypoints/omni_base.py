@@ -148,7 +148,14 @@ def _inject_deploy_defaults(model: str, kwargs: dict[str, Any]) -> None:
         if not deploy_path.exists():
             return
 
-    deploy = load_deploy_config(deploy_path)
+    try:
+        deploy = load_deploy_config(deploy_path)
+    except Exception:
+        import logging
+
+        logger = logging.getLogger("vllm_omni.entrypoints.omni_base")
+        logger.warning("Failed to load deploy config from %s", deploy_path)
+        return
 
     # Pipeline-wide: fill missing from DeployConfig
     for f in dc_fields(DeployConfig):

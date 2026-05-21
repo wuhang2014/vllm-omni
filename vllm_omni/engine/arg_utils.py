@@ -805,7 +805,11 @@ class OmniArgumentParser(FlexibleArgumentParser):
             if not deploy_path.exists():
                 return
 
-        deploy = load_deploy_config(deploy_path)
+        try:
+            deploy = load_deploy_config(deploy_path)
+        except Exception:
+            logger.warning("Failed to load deploy config from %s", deploy_path)
+            return
         serve_parser = self._get_serve_subparser()
         if serve_parser is None:
             if self._subparsers is None:
