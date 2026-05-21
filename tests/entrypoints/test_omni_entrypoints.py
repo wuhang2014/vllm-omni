@@ -1053,3 +1053,118 @@ def test_omni_errored_property_dead_stage(monkeypatch: pytest.MonkeyPatch):
         assert app.errored is True
     finally:
         app.shutdown()
+
+
+# ===========================================================================
+# Offline _inject_deploy_defaults
+# ===========================================================================
+
+
+class TestInjectDeployDefaults:
+    def test_normal_serve_fills_pipeline_defaults(self, tmp_path, mocker):
+        """Pipeline-wide DeployConfig fields filled via setdefault."""
+        from vllm_omni.entrypoints.omni_base import _inject_deploy_defaults
+
+        yaml = tmp_path / "test_model.yaml"
+        yaml.write_text("async_chunk: false\ndtype: bfloat16\nstages: []\n")
+
+        mocker.patch(
+            "vllm_omni.config.stage_config.StageConfigFactory._auto_detect_model_type",
+            return_value=("test_model", None),
+        )
+        mocker.patch("vllm_omni.config.stage_config._DEPLOY_DIR", tmp_path)
+
+        kwargs = {"model": "Qwen/Qwen2.5-Omni-7B", "dtype": "float32"}
+        _inject_deploy_defaults(kwargs["model"], kwargs)
+
+        assert kwargs["dtype"] == "float32"  # user value preserved
+        assert kwargs["async_chunk"] is False  # YAML injected
+
+    def test_headless_fills_per_stage_defaults(self, tmp_path, mocker):
+        """Per-stage StageDeployConfig fields filled in headless mode."""
+        from vllm_omni.entrypoints.omni_base import _inject_deploy_defaults
+
+        yaml = tmp_path / "test_model.yaml"
+        yaml.write_text("stages:\n  - stage_id: 0\n    gpu_memory_utilization: 0.5\n    enforce_eager: true\n")
+
+        mocker.patch(
+            "vllm_omni.config.stage_config.StageConfigFactory._auto_detect_model_type",
+            return_value=("test_model", None),
+        )
+        mocker.patch("vllm_omni.config.stage_config._DEPLOY_DIR", tmp_path)
+
+        kwargs = {"model": "Qwen/Qwen2.5-Omni-7B", "stage_id": 0, "gpu_memory_utilization": 0.3}
+        _inject_deploy_defaults(kwargs["model"], kwargs)
+
+        assert kwargs["gpu_memory_utilization"] == 0.3  # user value preserved
+        assert kwargs["enforce_eager"] is True  # YAML injected
+
+    def test_custom_deploy_config_used(self, tmp_path, mocker):
+        """When deploy_config is in kwargs, it's used instead of model_type detection."""
+        from vllm_omni.entrypoints.omni_base import _inject_deploy_defaults
+
+        custom = tmp_path / "custom_deploy.yaml"
+        custom.write_text("async_chunk: true\ndtype: custom_dtype\nstages: []\n")
+
+        kwargs = {"model": "Qwen/Qwen2.5-Omni-7B", "deploy_config": str(custom), "dtype": "float32"}
+        _inject_deploy_defaults(kwargs["model"], kwargs)
+
+        assert kwargs["dtype"] == "float32"  # user preserved
+        assert kwargs["async_chunk"] is True  # from custom YAML
+
+    def test_normal_serve_generates_stage_overrides(self, tmp_path, mocker):
+        """Per-stage defaults collapsed into stage_overrides JSON for normal serve."""
+        from vllm_omni.entrypoints.omni_base import _inject_deploy_defaults
+
+        yaml = tmp_path / "test_model.yaml"
+        yaml.write_text(
+            "stages:\n"
+            "  - stage_id: 0\n"
+            "    gpu_memory_utilization: 0.5\n"
+            "    enforce_eager: true\n"
+            "  - stage_id: 1\n"
+            "    gpu_memory_utilization: 0.8\n"
+            "    enforce_eager: false\n"
+        )
+
+        mocker.patch(
+            "vllm_omni.config.stage_config.StageConfigFactory._auto_detect_model_type",
+            return_value=("test_model", None),
+        )
+        mocker.patch("vllm_omni.config.stage_config._DEPLOY_DIR", tmp_path)
+
+        kwargs = {"model": "Qwen/Qwen2.5-Omni-7B"}
+        _inject_deploy_defaults(kwargs["model"], kwargs)
+
+        import json
+
+        so = json.loads(kwargs["stage_overrides"])
+        assert so["0"]["gpu_memory_utilization"] == 0.5
+        assert so["0"]["enforce_eager"] is True
+        assert so["1"]["gpu_memory_utilization"] == 0.8
+        assert so["1"]["enforce_eager"] is False
+
+    def test_stage_overrides_deep_merged_with_existing(self, tmp_path, mocker):
+        """Existing stage_overrides deep-merged with YAML defaults."""
+        from vllm_omni.entrypoints.omni_base import _inject_deploy_defaults
+
+        yaml = tmp_path / "test_model.yaml"
+        yaml.write_text("stages:\n  - stage_id: 0\n    gpu_memory_utilization: 0.5\n    enforce_eager: true\n")
+
+        mocker.patch(
+            "vllm_omni.config.stage_config.StageConfigFactory._auto_detect_model_type",
+            return_value=("test_model", None),
+        )
+        mocker.patch("vllm_omni.config.stage_config._DEPLOY_DIR", tmp_path)
+
+        kwargs = {
+            "model": "Qwen/Qwen2.5-Omni-7B",
+            "stage_overrides": '{"0": {"gpu_memory_utilization": 0.3}}',
+        }
+        _inject_deploy_defaults(kwargs["model"], kwargs)
+
+        import json
+
+        so = json.loads(kwargs["stage_overrides"])
+        assert so["0"]["gpu_memory_utilization"] == 0.3  # user wins
+        assert so["0"]["enforce_eager"] is True  # YAML preserved
