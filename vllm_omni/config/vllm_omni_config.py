@@ -299,22 +299,12 @@ def _resolve_stages(
     )
     from vllm_omni.platforms import current_omni_platform
 
-    # OmniEngineArgs needed to build per-stage engine args.
-    from vllm_omni.engine.arg_utils import OmniEngineArgs as _OA
-
     resolved_stages: list[StageResolvedConfig] = []
     prompt_expand_func = None
     top_level_diffusion_config: OmniDiffusionConfig | None = None
 
     # Sort stage IDs to ensure consistent ordering.
     sorted_stage_ids = sorted(stage_overrides.keys(), key=int)
-
-    # Base fields from engine_args (pipeline-wide values).
-    base_fields = {
-        f.name: getattr(engine_args, f.name)
-        for f in engine_args.__dataclass_fields__.values()
-        if getattr(engine_args, f.name) is not None
-    }
 
     for stage_id_str in sorted_stage_ids:
         stage_id = int(stage_id_str)
@@ -348,9 +338,8 @@ def _resolve_stages(
         omni_kv_connector = resolve_omni_kv_config_for_stage(omni_transfer_config, stage_id)
 
         if stage_type == "diffusion":
-            # Build OmniDiffusionConfig directly from merged fields.
-            merged_fields = {**base_fields, **per_stage_overrides}
-            od_config = OmniDiffusionConfig.from_kwargs(**merged_fields)
+            # Build OmniDiffusionConfig directly from engine_args.
+            od_config = engine_args.create_diffusion_config()
             num_devices = od_config.parallel_config.world_size
             device_env = current_omni_platform.device_control_env_var
             visible = os.environ.get(device_env) if device_env else None
