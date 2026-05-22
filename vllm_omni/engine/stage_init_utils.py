@@ -582,6 +582,39 @@ def build_engine_args_dict(
     return engine_args_dict
 
 
+def build_vllm_config_from_engine_args(
+    omni_engine_args: OmniEngineArgs,
+    *,
+    headless: bool = False,
+) -> tuple[Any, type]:
+    """Create VllmConfig and executor class from already-built OmniEngineArgs.
+
+    The caller is responsible for building the per-stage ``OmniEngineArgs``
+    (including model/tokenizer resolution, connector spec injection, etc.).
+    """
+    if omni_engine_args.max_model_len is not None and not os.environ.get(
+        "VLLM_ALLOW_LONG_MAX_MODEL_LEN"
+    ):
+        os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
+        logger.debug(
+            "Auto-set VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 for stage %s (max_model_len=%s).",
+            omni_engine_args.stage_id,
+            omni_engine_args.max_model_len,
+        )
+
+    vllm_config = omni_engine_args.create_engine_config(
+        usage_context=UsageContext.LLM_CLASS,
+        headless=headless,
+    )
+    executor_class = Executor.get_class(vllm_config)
+
+    upgraded = OmniINCConfig.maybe_upgrade(vllm_config.quant_config)
+    if upgraded is not vllm_config.quant_config:
+        vllm_config = replace(vllm_config, quant_config=upgraded)
+
+    return vllm_config, executor_class
+
+
 def build_vllm_config(
     stage_config: Any,
     model: str,
@@ -868,6 +901,47 @@ def get_stage_connector_spec(
     for cfg in stage_connectors_cfg.values():
         return dict(cfg.get("spec", {}))
     return {}
+
+
+def build_diffusion_config_from_fields(
+    fields: dict[str, Any],
+    stage_id: int,
+    model: str,
+    *,
+    cfg_kv_collect_func: Callable | None = None,
+) -> Any:
+    """Build ``OmniDiffusionConfig`` directly from a fields dict.
+
+    Avoids ``_PerStageCfg`` and ``build_engine_args_dict`` — the caller
+    has already assembled the required fields.
+    """
+    from vllm_omni.diffusion.data import OmniDiffusionConfig
+
+    # Resolve model/tokenizer paths before construction.
+    model = _resolve_model_tokenizer_paths(model, fields)
+    fields["model"] = model
+
+    od_config = OmniDiffusionConfig.from_kwargs(**fields)
+
+    num_devices_per_stage = od_config.parallel_config.world_size
+    device_control_env = current_omni_platform.device_control_env_var
+    visible_devices_str = os.environ.get(device_control_env) if device_control_env else None
+    if visible_devices_str:
+        physical_devices = [d.strip() for d in visible_devices_str.split(",") if d.strip()]
+    else:
+        physical_devices = list(range(current_omni_platform.get_device_count()))
+
+    if len(physical_devices) < num_devices_per_stage:
+        raise ValueError(
+            f"Stage {stage_id} requires {num_devices_per_stage} device(s) "
+            f"based on parallel_config, but {len(physical_devices)} device(s) "
+            f"are available: {physical_devices}"
+        )
+
+    od_config.num_gpus = num_devices_per_stage
+    if cfg_kv_collect_func is not None:
+        od_config.cfg_kv_collect_func = cfg_kv_collect_func
+    return od_config
 
 
 def build_diffusion_config(

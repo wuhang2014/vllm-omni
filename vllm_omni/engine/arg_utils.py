@@ -453,7 +453,7 @@ class OmniEngineArgs(EngineArgs):
         diffusion-specific fields on ``self``, then wraps it in a single-stage
         ``VllmOmniConfig``.
         """
-        from vllm_omni.config.vllm_omni_config import StageResolvedConfig, _PerStageCfg, _resolve_dotted_func
+        from vllm_omni.config.vllm_omni_config import StageResolvedConfig
         from vllm_omni.diffusion.data import OmniDiffusionConfig
         from vllm_omni.platforms import current_omni_platform
 
@@ -480,9 +480,6 @@ class OmniEngineArgs(EngineArgs):
                 f"are available: {physical_devices}"
             )
         od_config.num_gpus = num_devices_per_stage
-
-        # Build lightweight metadata for the single diffusion stage.
-        stage_cfg = _PerStageCfg(stage_id=0, stage_type="diffusion", engine_args=fields)
 
         return VllmOmniConfig(
             model=model,
