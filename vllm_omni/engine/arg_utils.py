@@ -1,15 +1,33 @@
+from __future__ import annotations
+
 import argparse
-import dataclasses
+import dataclasses as _dc
 import json
 import os
+import sys
 import tempfile
-from dataclasses import dataclass, field, fields
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.logger import init_logger
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-from vllm_omni.config import OmniModelConfig
+from vllm_omni.config import VllmOmniConfig
+from vllm_omni.config.stage_config import (
+    _PIPELINE_WIDE_ENGINE_FIELDS,
+)
+from vllm_omni.config.stage_config import (
+    StageDeployConfig as _StageDeployConfig,
+)
+from vllm_omni.config.stage_config import (
+    StageExecutionType as _StageExecutionType,
+)
+from vllm_omni.config.stage_config import (
+    StagePipelineConfig as _StagePipelineConfig,
+)
+from vllm_omni.config.vllm_omni_config import build_vllm_omni_config
 from vllm_omni.engine.output_modality import OutputModality
 from vllm_omni.platforms import current_omni_platform
 from vllm_omni.plugins import load_omni_general_plugins
@@ -41,9 +59,6 @@ def _register_omni_hf_configs() -> None:
         logger.warning("Skipping omni HF config registration due to import error: %s", exc)
         return
 
-    # Register with both transformers AutoConfig and vLLM's config registry
-    # so models with empty/missing config.json (e.g. CosyVoice3) can be
-    # resolved when model_type is injected via hf_overrides.
     try:
         from vllm.transformers_utils.config import _CONFIG_REGISTRY
     except ImportError:
@@ -55,7 +70,6 @@ def _register_omni_hf_configs() -> None:
         try:
             AutoConfig.register(model_type, config_cls)
         except ValueError:
-            # Already registered elsewhere; ignore.
             pass
         if _CONFIG_REGISTRY is not None and model_type not in _CONFIG_REGISTRY:
             _CONFIG_REGISTRY[model_type] = config_cls
@@ -74,53 +88,156 @@ def register_omni_models_to_vllm():
             ModelRegistry.register_model(arch, f"vllm_omni.model_executor.models.{mod_folder}.{mod_relname}:{cls_name}")
 
 
+# ============================================================================
+# OmniEngineArgs — consolidated
+# ============================================================================
+
+
 @dataclass
 class OmniEngineArgs(EngineArgs):
-    """Engine arguments for omni models, extending base EngineArgs.
-    Adds omni-specific configuration fields for multi-stage pipeline
-    processing and output type specification.
-    Args:
-        stage_id: Identifier for the stage in a multi-stage pipeline.
-            Defaults to 0 for per-stage engine construction. The CLI-level
-            single-stage selector remains optional on the parsed argparse
-            namespace and should not be forwarded as a nullable per-stage
-            engine argument.
-        model_stage: Stage type identifier, e.g., "thinker" or "talker"
-            (default: "thinker")
-        model_arch: Model architecture name
-            (default: "Qwen2_5OmniForConditionalGeneration")
-        engine_output_type: Optional output type specification for the engine.
-            Used to route outputs to appropriate processors (e.g., "image",
-            "audio", "latents"). If None, output type is inferred.
-        hf_config_name: Optional key for HF config subkey to be extracted
-            for this stage, e.g., talker_config; If None, the default
-            HF config will be used.
-        custom_process_next_stage_input_func: Optional path to a custom function for processing
-            inputs from previous stages
-            If None, default processing is used.
-        stage_connector_spec: Extra configuration for stage connector
-        async_chunk: If set to True, perform async chunk
-        worker_type: Model Type, e.g., "ar" or "generation"
-        task_type: Default task type for TTS models (CustomVoice, VoiceDesign, or Base).
-            If not specified, will be inferred from model path.
-        omni_master_address: TCP address that the OmniMasterServer (running
-            inside AsyncOmniEngine) listens on for engine core registrations.
-            Required when single-stage mode is active.
-        omni_master_port: TCP port for the OmniMasterServer registration
-            socket.  Required when single-stage mode is active.
-        stage_configs_path: Optional path to a JSON/YAML file containing
-            stage configurations for the multi-stage pipeline. If None,
-            stage configs are resolved from the model's default configuration.
-        output_modalities: Optional list of output modality names to enable
-            (e.g. ["text", "audio"]). If None, all modalities supported by
-            the model are used.
-        log_stats: Whether to log engine statistics. Defaults to False.
-        custom_pipeline_args: Dictionary of arguments for custom pipeline
-            initialization (e.g., ``{"pipeline_class": "my.Module"}``).
-            Passed through to the diffusion stage engine.
+    """Unified engine arguments for vLLM-Omni.
+
+    Absorbs all omni-specific fields from what were previously
+    ``OrchestratorArgs``, ``SHARED_FIELDS``, and the old
+    ``OmniEngineArgs`` into a single dataclass.
+
+    Online:  ``OmniEngineArgs.from_cli_args(parsed_args)``
+    Offline: ``OmniEngineArgs.from_kwargs(model, **kwargs)``
+
+    The resolved ``VllmOmniConfig`` is produced by
+    :meth:`create_omni_config`.
     """
 
-    stage_id: int = 0
+    # ── Mode ─────────────────────────────────────────────────────
+
+    omni: bool = False
+    headless: bool = False
+
+    # ── Orchestrator lifecycle ───────────────────────────────────
+
+    stage_init_timeout: int = 300
+    init_timeout: int = 600
+
+    # ── Cross-stage communication ────────────────────────────────
+
+    shm_threshold_bytes: int = 65536
+    batch_timeout: int = 10
+    async_chunk: bool | None = None
+
+    # ── Backend ──────────────────────────────────────────────────
+
+    worker_backend: str = "multi_process"
+    ray_address: str | None = None
+
+    # ── Config files ─────────────────────────────────────────────
+
+    deploy_config: str | None = None
+    stage_overrides: str | None = None
+
+    # ── Headless ─────────────────────────────────────────────────
+
+    stage_id: int | None = None
+    replica_id: int = 0
+    omni_master_address: str | None = None
+    omni_master_port: int | None = None
+    omni_replica_address: str | None = None
+
+    # ── OmniCoordinator ──────────────────────────────────────────
+
+    omni_dp_size_local: int = 1
+    omni_lb_policy: str = "random"
+    omni_heartbeat_timeout: float = 30.0
+
+    # ── Observability ────────────────────────────────────────────
+
+    log_stats: bool = False
+    log_file: str | None = None
+    enable_diffusion_pipeline_profiler: bool = False
+    enable_ar_profiler: bool = False
+
+    # ── Output ───────────────────────────────────────────────────
+
+    output_modalities: list[str] | None = None
+    diffusion_batch_size: int = 1
+    tts_batch_max_items: int = 32
+
+    # ── Diffusion model ──────────────────────────────────────────
+
+    num_gpus: int | None = None
+    model_class_name: str | None = None
+    diffusion_load_format: str | None = None
+    diffusers_load_kwargs: dict[str, Any] | None = None
+    diffusers_call_kwargs: dict[str, Any] | None = None
+
+    # ── Diffusion parallelism ────────────────────────────────────
+
+    ulysses_degree: int | None = None
+    ulysses_mode: str = "strict"
+    ring_degree: int | None = None
+    cfg_parallel_size: int = 1
+    vae_patch_parallel_size: int = 1
+    use_hsdp: bool = False
+    hsdp_shard_size: int = -1
+    hsdp_replicate_size: int = 1
+
+    # ── Diffusion attention ──────────────────────────────────────
+
+    diffusion_attention_backend: str | None = None
+    diffusion_attention_config: dict[str, Any] | None = None
+
+    # ── Diffusion cache ──────────────────────────────────────────
+
+    cache_backend: str = "none"
+    cache_config: str | None = None
+    enable_cache_dit_summary: bool = False
+
+    # ── Diffusion execution ──────────────────────────────────────
+
+    step_execution: bool = False
+    boundary_ratio: float | None = None
+    flow_shift: float | None = None
+
+    # ── VAE ──────────────────────────────────────────────────────
+
+    vae_use_slicing: bool = False
+    vae_use_tiling: bool = False
+
+    # ── Weight loading ───────────────────────────────────────────
+
+    enable_multithread_weight_load: bool = True
+    num_weight_load_threads: int = 4
+
+    # ── Offloading ───────────────────────────────────────────────
+
+    enable_cpu_offload: bool = False
+    enable_layerwise_offload: bool = False
+
+    # ── KV cache ─────────────────────────────────────────────────
+
+    diffusion_kv_cache_dtype: str | None = None
+    diffusion_kv_cache_skip_steps: str | None = None
+    diffusion_kv_cache_skip_layers: str | None = None
+
+    # ── Quantisation ─────────────────────────────────────────────
+
+    quantization_config: Any | None = None
+    force_cutlass_fp8: bool | None = None
+
+    # ── LoRA ─────────────────────────────────────────────────────
+
+    lora_path: str | None = None
+    lora_scale: float | None = None
+
+    # ── Sampling ─────────────────────────────────────────────────
+
+    default_sampling_params: str | None = None
+    max_generated_image_size: int | None = None
+    tts_max_instructions_length: int | None = None
+
+    # ── Per-stage forwarded ──────────────────────────────────────
+
+    enable_sleep_mode: bool = False
+    task_type: str | None = None
     model_stage: str = "thinker"
     model_arch: str | None = None
     engine_output_type: str | None = None
@@ -128,74 +245,231 @@ class OmniEngineArgs(EngineArgs):
     custom_process_next_stage_input_func: str | None = None
     stage_connector_spec: dict[str, Any] = field(default_factory=dict)
     subtalker_sampling_params: dict[str, Any] | None = None
-    async_chunk: bool = False
-    omni_kv_config: dict | None = None
-    quantization_config: Any | None = None
-    force_cutlass_fp8: bool | None = None
+    omni_kv_config: dict[str, Any] | None = None
     worker_type: str | None = None
-    task_type: str | None = None
-    worker_cls: str = None
-    enable_sleep_mode: bool = False
-    omni: bool = False
-
-    @classmethod
-    def _add_omni_specific_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-        try:
-            parser.add_argument("--omni", action="store_true", default=False, help="Enable Omni engine features.")
-        except argparse.ArgumentError:
-            pass
-        try:
-            parser.add_argument(
-                "--enable-sleep-mode", action="store_true", default=False, help="Enable GPU memory pool for sleep mode."
-            )
-        except argparse.ArgumentError:
-            pass
-        return parser
-
-    omni_master_address: str | None = None
-    omni_master_port: int | None = None
-    # OmniCoordinator integration knobs (process-local).
-    omni_dp_size_local: int = 1
-    omni_lb_policy: str = "random"
-    omni_heartbeat_timeout: float = 30.0
-    stage_configs_path: str | None = None
-    output_modalities: list[str] | None = None
-    log_stats: bool = False
+    worker_cls: str | None = None
     custom_pipeline_args: dict[str, Any] | None = None
     has_sampling_extra_args: bool = False
 
-    def __post_init__(self) -> None:
-        if self.worker_cls is None:
-            if self.worker_type == "ar":
-                self.worker_cls = current_omni_platform.get_omni_ar_worker_cls()
-            elif self.worker_type == "generation":
-                self.worker_cls = current_omni_platform.get_omni_generation_worker_cls()
-        load_omni_general_plugins()
-        super().__post_init__()
+    parallel_config: Any = None
+    tokenizer: str | None = None
 
-    @classmethod
-    def from_cli_args(cls, args: argparse.Namespace) -> "OmniEngineArgs":
-        attrs = [attr.name for attr in dataclasses.fields(cls)]
-        engine_args = cls(**{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)})
-        engine_args._explicit_fields = frozenset(
-            attr for attr in attrs if hasattr(args, attr) and getattr(args, attr) is not None
+    # ================================================================
+    # CLI registration
+    # ================================================================
+
+    @staticmethod
+    def add_cli_args(
+        parser: argparse.ArgumentParser,
+        *,
+        omni_args_only: bool = False,
+    ) -> argparse.ArgumentParser:
+        """Register all omni CLI flags in an ``OmniConfig`` argument group.
+
+        Delegates to ``EngineArgs.add_cli_args`` first for all upstream
+        vLLM flags, then adds omni-specific flags.  Pass
+        ``omni_args_only=True`` when the parser already has upstream
+        vLLM flags registered (e.g. via ``make_arg_parser``).
+        """
+        if not omni_args_only:
+            parser = EngineArgs.add_cli_args(parser)
+
+        group = parser.add_argument_group(
+            title="OmniConfig",
+            description="Configuration for vLLM-Omni multi-stage and diffusion models.",
         )
-        return engine_args
+
+        # ── Mode switches ──
+        try:
+            group.add_argument("--omni", action="store_true", default=False, help="Enable vLLM-Omni mode.")
+        except argparse.ArgumentError:
+            pass
+        try:
+            group.add_argument(
+                "--headless", action="store_true", default=False, help="Run a single stage in headless mode."
+            )
+        except argparse.ArgumentError:
+            pass
+
+        # ── Orchestrator lifecycle ──
+        group.add_argument(
+            "--stage-init-timeout", type=int, default=300, help="Timeout for single stage init (seconds)."
+        )
+        group.add_argument(
+            "--init-timeout", type=int, default=600, help="Total orchestrator startup timeout (seconds)."
+        )
+
+        # ── Cross-stage communication ──
+        group.add_argument("--shm-threshold-bytes", type=int, default=65536, help="Shared memory threshold.")
+        group.add_argument("--batch-timeout", type=int, default=10, help="Batch collection timeout (seconds).")
+        group.add_argument(
+            "--async-chunk",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help="Override deploy YAML async_chunk setting.",
+        )
+
+        # ── Backend ──
+        group.add_argument("--worker-backend", type=str, default="multi_process", choices=["multi_process", "ray"])
+        group.add_argument("--ray-address", type=str, default=None)
+
+        # ── Config files ──
+        group.add_argument(
+            "--deploy-config",
+            type=str,
+            default=None,
+            help="Path to deploy YAML (new format with stages).",
+        )
+        group.add_argument(
+            "--stage-overrides",
+            type=str,
+            default=None,
+            help='Per-stage JSON overrides. Example: \'{"0": {"gpu_memory_utilization": 0.8}}\'.',
+        )
+
+        # ── Headless / single-stage ──
+        group.add_argument("--stage-id", type=int, default=None, help="Select a single stage by stage_id.")
+        group.add_argument("--replica-id", type=int, default=0, help="Replica id for headless stage registration.")
+        group.add_argument("--omni-master-address", type=str, default=None, help="Omni orchestrator hostname/IP.")
+        group.add_argument("--omni-master-port", type=int, default=None, help="Omni orchestrator port.")
+        group.add_argument("--omni-replica-address", type=str, default=None)
+
+        # ── OmniCoordinator ──
+        group.add_argument("--omni-dp-size-local", type=int, default=1)
+        group.add_argument("--omni-lb-policy", type=str, default="random")
+        group.add_argument("--omni-heartbeat-timeout", type=float, default=30.0)
+
+        # ── Observability ──
+        group.add_argument(
+            "--log-stats", action="store_true", default=False, help="Enable per-request pipeline metrics logging."
+        )
+        group.add_argument("--log-file", type=str, default=None, help="Path to the log file.")
+        group.add_argument("--enable-diffusion-pipeline-profiler", action="store_true", default=False)
+
+        # ── Output ──
+        group.add_argument("--output-modalities", type=str, nargs="*", default=None)
+        group.add_argument("--diffusion-batch-size", type=int, default=1)
+        group.add_argument("--tts-batch-max-items", type=int, default=32)
+
+        # ── Diffusion model ──
+        group.add_argument("--num-gpus", type=int, default=None)
+        group.add_argument("--model-class-name", type=str, default=None)
+        group.add_argument("--diffusion-load-format", type=str, default=None)
+        group.add_argument("--diffusers-load-kwargs", type=str, default=None)
+        group.add_argument("--diffusers-call-kwargs", type=str, default=None)
+
+        # ── Diffusion parallelism ──
+        group.add_argument("--ulysses-degree", type=int, default=None)
+        group.add_argument("--ulysses-mode", type=str, default="strict")
+        group.add_argument("--ring-degree", type=int, default=None)
+        group.add_argument("--cfg-parallel-size", type=int, default=1)
+        group.add_argument("--vae-patch-parallel-size", type=int, default=1)
+        group.add_argument("--use-hsdp", action="store_true", default=False)
+        group.add_argument("--hsdp-shard-size", type=int, default=-1)
+        group.add_argument("--hsdp-replicate-size", type=int, default=1)
+
+        # ── Diffusion attention ──
+        group.add_argument("--diffusion-attention-backend", type=str, default=None)
+        group.add_argument("--diffusion-attention-config", type=str, default=None)
+
+        # ── Diffusion cache ──
+        group.add_argument("--cache-backend", type=str, default="none")
+        group.add_argument("--cache-config", type=str, default=None)
+        group.add_argument("--enable-cache-dit-summary", action="store_true", default=False)
+
+        # ── Diffusion execution ──
+        group.add_argument("--step-execution", action="store_true", default=False)
+        group.add_argument("--boundary-ratio", type=float, default=None)
+        group.add_argument("--flow-shift", type=float, default=None)
+
+        # ── VAE ──
+        group.add_argument("--vae-use-slicing", action="store_true", default=False)
+        group.add_argument("--vae-use-tiling", action="store_true", default=False)
+
+        # ── Weight loading ──
+        group.add_argument("--enable-multithread-weight-load", action="store_true", default=True)
+        group.add_argument("--num-weight-load-threads", type=int, default=4)
+
+        # ── Offloading ──
+        group.add_argument("--enable-cpu-offload", action="store_true", default=False)
+        group.add_argument("--enable-layerwise-offload", action="store_true", default=False)
+
+        # ── KV cache ──
+        group.add_argument("--diffusion-kv-cache-dtype", type=str, default=None)
+        group.add_argument("--diffusion-kv-cache-skip-steps", type=str, default=None)
+        group.add_argument("--diffusion-kv-cache-skip-layers", type=str, default=None)
+
+        # ── Quantisation ──
+        group.add_argument("--quantization-config", type=str, default=None)
+        group.add_argument("--force-cutlass-fp8", type=bool, default=None)
+
+        # ── LoRA ──
+        group.add_argument("--lora-path", type=str, default=None)
+        group.add_argument("--lora-scale", type=float, default=None)
+
+        # ── Sampling ──
+        group.add_argument("--default-sampling-params", type=str, default=None)
+        group.add_argument("--max-generated-image-size", type=int, default=None)
+        group.add_argument("--tts-max-instructions-length", type=int, default=None)
+
+        # ── Per-stage / TTS ──
+        try:
+            group.add_argument("--enable-sleep-mode", action="store_true", default=False)
+        except argparse.ArgumentError:
+            pass
+        group.add_argument("--task-type", type=str, default=None)
+        group.add_argument("--enable-ar-profiler", action="store_true", default=False)
+
+        return parser
+
+    # ================================================================
+    # Construction
+    # ================================================================
 
     @classmethod
-    def create(cls, **explicit: Any) -> "OmniEngineArgs":
-        """Tracks caller-set fields for ``Omni(..., engine_args=ea)``."""
-        ea = cls(**explicit)
-        ea._explicit_fields = frozenset(explicit.keys())
-        return ea
+    def from_cli_args(cls, args: argparse.Namespace) -> OmniEngineArgs:
+        """Build from a parsed argparse Namespace.
 
-    def explicit_kwargs(self) -> dict[str, Any]:
-        explicit = getattr(self, "_explicit_fields", None)
-        if explicit is None:
-            return {
-                f.name: getattr(self, f.name) for f in dataclasses.fields(self) if getattr(self, f.name) is not None
-            }
-        return {k: getattr(self, k) for k in explicit}
+        Simple extraction — ``OmniArgumentParser`` already injected
+        YAML defaults as ``action.default`` before parse, so no
+        explicit-field tracking is needed.
+        """
+        attrs = [attr.name for attr in _dc.fields(cls)]
+        return cls(**{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)})
+
+    @classmethod
+    def from_kwargs(cls, model: str, **kwargs: Any) -> OmniEngineArgs:
+        """Build from raw keyword arguments (offline path).
+
+        Calls ``_inject_deploy_defaults`` to fill YAML defaults via
+        ``kwargs.setdefault()`` before construction.
+        """
+        # Defer import to avoid circular dependency.
+        from vllm_omni.entrypoints.omni_base import _inject_deploy_defaults
+
+        _inject_deploy_defaults(model, kwargs)
+        # Build from kwargs, letting OmniEngineArgs defaults fill in the rest.
+        engine_fields = {f.name for f in _dc.fields(cls)}
+        return cls(**{k: v for k, v in kwargs.items() if k in engine_fields})
+
+    def create_omni_config(
+        self,
+        model: str,
+    ) -> VllmOmniConfig:
+        """Build a resolved ``VllmOmniConfig`` from this engine args instance.
+
+        Delegates to :func:`build_vllm_omni_config`.
+        """
+        return build_vllm_omni_config(
+            model=model,
+            engine_args=self,
+            stage_init_timeout=self.stage_init_timeout,
+            init_timeout=self.init_timeout,
+            shm_threshold_bytes=self.shm_threshold_bytes,
+            batch_timeout=self.batch_timeout,
+            worker_backend=self.worker_backend,
+            log_stats=self.log_stats,
+        )
 
     def _ensure_omni_models_registered(self):
         if hasattr(self, "_omni_models_registered"):
@@ -204,49 +478,12 @@ class OmniEngineArgs(EngineArgs):
         self._omni_models_registered = True
         return True
 
-    def _patch_empty_hf_config(self, model_type: str) -> None:
-        """For models with empty config.json (e.g. CosyVoice3), create a
-        patched config in a temp directory with model_type set so that
-        transformers AutoConfig.from_pretrained can resolve the config class.
-        Sets self.hf_config_path to point to the patched directory."""
-        try:
-            from transformers import PretrainedConfig
+    def _prepare_hf_config(self) -> None:
+        """Prepare HF config overrides and auto-detect tokenizer.
 
-            config_dict, _ = PretrainedConfig.get_config_dict(self.model)
-            if config_dict.get("model_type"):
-                return  # config.json already has model_type, no patching needed
-        except Exception:
-            return  # can't load config, let vLLM handle the error
-
-        # Create a temp dir with a patched config.json
-        temp_dir = tempfile.mkdtemp(prefix="omni_hf_config_")
-        config_dict["model_type"] = model_type
-        config_dict.setdefault("architectures", [self.model_arch])
-        with open(os.path.join(temp_dir, "config.json"), "w") as f:
-            json.dump(config_dict, f)
-        self.hf_config_path = temp_dir
-        self._temp_config_dir = temp_dir
-        logger.info("Patched empty HF config with model_type=%s at %s", model_type, temp_dir)
-
-    def create_model_config(self) -> OmniModelConfig:
-        """Create an OmniModelConfig from these engine arguments.
-        Returns:
-            OmniModelConfig instance with all configuration fields set
+        Runs in ``__post_init__`` so that models with empty config.json
+        (e.g. CosyVoice3) are patched before vLLM tries to load them.
         """
-        # register omni models to avoid model not found error
-        self._ensure_omni_models_registered()
-
-        # Build stage_connector_config from stage_connector_spec
-        stage_connector_config = {
-            "name": self.stage_connector_spec.get("name", "SharedMemoryConnector"),
-            "extra": self.stage_connector_spec.get("extra", {}).copy(),
-        }
-        stage_connector_config["extra"]["stage_id"] = self.stage_id
-
-        # If model_arch is specified, inject it into hf_overrides so vLLM can
-        # resolve the architecture even when config.json lacks 'architectures'.
-        # Also inject model_type so AutoConfig can resolve the correct config
-        # class for models with empty or missing config.json (e.g. CosyVoice3).
         if self.model_arch:
             if self.hf_overrides is None:
                 self.hf_overrides = {}
@@ -256,46 +493,32 @@ class OmniEngineArgs(EngineArgs):
                     model_type = _ARCH_TO_MODEL_TYPE.get(self.model_arch)
                     if model_type is not None:
                         self.hf_overrides.setdefault("model_type", model_type)
-
-                # Stage wrappers (e.g. Code2Wav) may need max_model_len larger
-                # than the base checkpoint's text max_position_embeddings.
                 if self.model_arch == "Qwen3TTSCode2Wav" and self.max_model_len is not None:
                     self.hf_overrides.setdefault("talker_config", {}).setdefault(
                         "max_position_embeddings", int(self.max_model_len)
                     )
-
-            # For models whose HF config.json is empty or lacks model_type
-            # (e.g. CosyVoice3), AutoConfig.from_pretrained fails because it
-            # cannot determine which config class to use from the empty dict.
-            # hf_overrides alone is not enough since transformers reads
-            # model_type from config_dict before applying overrides.
-            # Workaround: create a patched config.json in a temp directory
-            # and point hf_config_path to it so vLLM reads model_type from it.
             if not self.hf_config_path:
                 model_type = _ARCH_TO_MODEL_TYPE.get(self.model_arch)
                 if model_type is not None:
                     self._patch_empty_hf_config(model_type)
 
-        # Auto-detect tokenizer for models that store it in a subdirectory
-        # rather than the root (e.g. CosyVoice3 uses CosyVoice-BlankEN/).
+        # Auto-detect tokenizer subdirectory.
         if not self.tokenizer and self.model:
-            model_path = self.model
-            if os.path.isdir(model_path) and not os.path.isfile(os.path.join(model_path, "tokenizer_config.json")):
-                for subfolder in sorted(os.listdir(model_path)):
-                    candidate = os.path.join(model_path, subfolder)
+            if os.path.isdir(self.model) and not os.path.isfile(os.path.join(self.model, "tokenizer_config.json")):
+                for subfolder in sorted(os.listdir(self.model)):
+                    candidate = os.path.join(self.model, subfolder)
                     if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, "tokenizer_config.json")):
                         self.tokenizer = candidate
                         logger.info("Auto-detected tokenizer at %s", candidate)
                         break
-            elif not os.path.isdir(model_path):
+            elif not os.path.isdir(self.model):
                 subfolder = _TOKENIZER_SUBFOLDER_MAP.get(self.model_arch)
                 if subfolder:
-                    # Download just the tokenizer files from the subfolder
                     try:
                         from huggingface_hub import snapshot_download
 
                         local_dir = snapshot_download(
-                            model_path,
+                            self.model,
                             allow_patterns=[
                                 f"{subfolder}/tokenizer*",
                                 f"{subfolder}/special_tokens*",
@@ -307,39 +530,46 @@ class OmniEngineArgs(EngineArgs):
                         candidate = os.path.join(local_dir, subfolder)
                         if os.path.isdir(candidate):
                             self.tokenizer = candidate
-                            logger.info("Downloaded tokenizer from %s/%s", model_path, subfolder)
+                            logger.info("Downloaded tokenizer from %s/%s", self.model, subfolder)
                     except Exception as e:
                         logger.warning("Failed to download tokenizer subfolder: %s", e)
 
-        # Build the vLLM config first, then use it to create the Omni config.
+    def _patch_empty_hf_config(self, model_type: str) -> None:
+        """For models with empty config.json (e.g. CosyVoice3), create a
+        patched config in a temp directory with model_type set."""
         try:
-            model_config = super().create_model_config()
-        finally:
-            # Clean up temp config dir if we created one
-            if hasattr(self, "_temp_config_dir"):
-                import shutil
+            from transformers import PretrainedConfig
 
-                shutil.rmtree(self._temp_config_dir, ignore_errors=True)
-                del self._temp_config_dir
+            config_dict, _ = PretrainedConfig.get_config_dict(self.model)
+            if config_dict.get("model_type"):
+                return
+        except Exception:
+            return
 
-        omni_config = OmniModelConfig.from_vllm_model_config(
-            model_config=model_config,
-            # All kwargs below are Omni specific
-            stage_id=self.stage_id,
-            async_chunk=self.async_chunk,
-            model_stage=self.model_stage,
-            model_arch=self.model_arch,
-            worker_type=self.worker_type,
-            engine_output_type=self.engine_output_type,
-            hf_config_name=self.hf_config_name,
-            custom_process_next_stage_input_func=self.custom_process_next_stage_input_func,
-            stage_connector_config=stage_connector_config,
-            subtalker_sampling_params=self.subtalker_sampling_params,
-            omni_kv_config=self.omni_kv_config,
-            task_type=self.task_type,
-            has_sampling_extra_args=self.has_sampling_extra_args,
-        )
-        return omni_config
+        temp_dir = tempfile.mkdtemp(prefix="omni_hf_config_")
+        config_dict["model_type"] = model_type
+        config_dict.setdefault("architectures", [self.model_arch])
+        with open(os.path.join(temp_dir, "config.json"), "w") as f:
+            json.dump(config_dict, f)
+        self.hf_config_path = temp_dir
+        self._temp_config_dir = temp_dir
+        logger.info("Patched empty HF config with model_type=%s at %s", model_type, temp_dir)
+
+    def __post_init__(self) -> None:
+        if self.worker_cls is None:
+            if self.worker_type == "ar":
+                self.worker_cls = current_omni_platform.get_omni_ar_worker_cls()
+            elif self.worker_type == "generation":
+                self.worker_cls = current_omni_platform.get_omni_generation_worker_cls()
+        load_omni_general_plugins()
+        self._ensure_omni_models_registered()
+        self._prepare_hf_config()
+        super().__post_init__()
+
+
+# ============================================================================
+# OmniAsyncEngineArgs
+# ============================================================================
 
 
 @dataclass
@@ -347,282 +577,520 @@ class OmniAsyncEngineArgs(AsyncEngineArgs, OmniEngineArgs):
     @classmethod
     def add_cli_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         parser = AsyncEngineArgs.add_cli_args(parser)
-        parser = OmniEngineArgs._add_omni_specific_args(parser)
+        parser = OmniEngineArgs.add_cli_args(parser, omni_args_only=True)
         return parser
 
     @property
     def output_modality(self) -> OutputModality:
-        """Parse engine_output_type into a type-safe OutputModality flag."""
         return OutputModality.from_string(self.engine_output_type)
 
 
 # ============================================================================
-# CLI argument routing
+# OmniArgumentParser
 # ============================================================================
-#
-# vLLM-Omni's CLI flags live in three buckets:
-#
-#     ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-#     │ OrchestratorArgs │    │  OmniEngineArgs  │    │  (upstream vllm) │
-#     │                  │    │                  │    │    server/api    │
-#     │  stage_timeout   │    │  max_num_seqs    │    │  host, port      │
-#     │  worker_backend  │    │  gpu_mem_util    │    │  ssl_keyfile     │
-#     │  deploy_config   │    │  dtype, quant    │    │  api_key         │
-#     │     ...          │    │     ...          │    │     ...          │
-#     └──────────────────┘    └──────────────────┘    └──────────────────┘
-#             │                        │                        │
-#             ▼                        ▼                        ▼
-#        orchestrator              each stage               uvicorn /
-#        consumes                  engine                   FastAPI
-#
-# Fields in ``SHARED_FIELDS`` (e.g. ``model``, ``log_stats``) flow to BOTH
-# orchestrator and engine by design.
-#
-# Invariants enforced by ``tests/test_arg_utils.py``:
-#
-#   1. ``OrchestratorArgs`` ∩ ``OmniEngineArgs`` ⊆ ``SHARED_FIELDS``
-#   2. Every CLI flag is classifiable into one of the three buckets
-#   3. User-typed flags that match none of the above are logged as dropped
-#
-# Adding a new orchestrator-only flag → add a field to ``OrchestratorArgs``.
-# Everything else is automatic.
 
 
-@dataclass(frozen=True)
-class OrchestratorArgs:
-    """CLI flags consumed by the orchestrator.
+class OmniArgumentParser(FlexibleArgumentParser):
+    """FlexibleArgumentParser that injects model-specific defaults from
+    deploy YAML as ``action.default`` before delegating to
+    ``super().parse_args()``.
 
-    Contract: every field here is either
-      (a) orchestrator-only (never needed by a stage engine), OR
-      (b) orchestrator-read-then-redistributed (e.g. ``async_chunk`` is read
-          from CLI, written to ``DeployConfig``, then propagated to every
-          stage via ``merge_pipeline_deploy`` — not via direct kwargs
-          forwarding).
+    Replaces the old nullify-then-refill pattern:
 
-    Fields that BOTH orchestrator and engine genuinely need (e.g. ``model``,
-    ``log_stats``) should be listed in ``SHARED_FIELDS`` below; ``split_kwargs``
-    will copy them to both buckets.
+    BEFORE:
+        nullify_stage_engine_defaults() → parse → YAML merge fills None
+
+    AFTER:
+        set YAML values as ``action.default`` → parse → argparse handles precedence
     """
 
-    # === Lifecycle ===
-    stage_init_timeout: int = 300
-    init_timeout: int = 600
+    def parse_args(
+        self,
+        args: Sequence[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> argparse.Namespace:
+        if args is None:
+            args = sys.argv[1:]
 
-    # === Cross-stage Communication ===
-    shm_threshold_bytes: int = 65536
-    batch_timeout: int = 10
+        args_list = list(args)
 
-    # === Cluster / Backend ===
-    worker_backend: str = "multi_process"
-    ray_address: str | None = None
+        # Clear stale state from a previous parse_args() call.
+        self._omni_pipeline = None
+        self._omni_model_type = None
+        self._yaml_stage_overrides = None
 
-    # === Config Files ===
-    stage_configs_path: str | None = None
-    deploy_config: str | None = None
-    stage_overrides: str | None = None  # raw JSON string; parsed downstream
+        # Gate: only inject defaults for "serve" subcommand or flat-parser
+        # mode (api_server direct launch). Avoids unnecessary HF config
+        # fetches for unrelated subcommands like "bench".
+        if self._is_serve_or_flat(args_list) and not self._is_help_or_version(args_list):
+            if self._subparsers is None:
+                model = self._peek_model_flat(args_list)
+            else:
+                model = self._peek_model(args_list)
+            if model:
+                stage_id = self._peek_stage_id(args_list)
+                deploy_config_path = self._peek_deploy_config(args_list)
+                self._inject_model_defaults(model, stage_id, deploy_config_path=deploy_config_path)
 
-    # === Mode Switches (orchestrator reads, DeployConfig redistributes) ===
-    async_chunk: bool | None = None
+        result = super().parse_args(args, namespace)
 
-    # === Observability ===
-    log_stats: bool = False
+        # Post-parse: deep-merge stashed YAML stage_overrides with user value.
+        yaml_overrides = getattr(self, "_yaml_stage_overrides", None)
+        if yaml_overrides is not None and hasattr(result, "stage_overrides"):
+            user_raw = getattr(result, "stage_overrides", None)
+            if user_raw:
+                user_overrides = json.loads(user_raw) if isinstance(user_raw, str) else user_raw
+                merged = _deep_merge(yaml_overrides, user_overrides)
+            else:
+                merged = yaml_overrides
+            setattr(result, "stage_overrides", json.dumps(merged, sort_keys=True))
 
-    # === Headless Mode (also forwarded to engine — see SHARED_FIELDS) ===
-    stage_id: int | None = None
+        return result
 
-    # === Pre-built Objects ===
-    parallel_config: Any = None
+    # ── Peek helpers ────────────────────────────────────────────────────
 
-    # === Multi-stage guards ===
-    # --tokenizer is captured by the orchestrator and forwarded to stages
-    # only when the stage does not define tokenizer/tokenizer_subdir itself.
-    # Users wanting a per-stage tokenizer should set it in the deploy YAML.
-    tokenizer: str | None = None
+    @staticmethod
+    def _is_help_or_version(args: list[str]) -> bool:
+        for a in args:
+            if a in ("--help", "-h", "--version", "-v") or a.startswith("--help="):
+                return True
+        return False
 
+    def _is_serve_or_flat(self, args: list[str]) -> bool:
+        """True when injection should proceed: ``serve`` subcommand or flat-parser."""
+        if self._subparsers is None:
+            return True
+        return bool(args) and args[0] == "serve"
 
-# Fields that live in BOTH OrchestratorArgs and OmniEngineArgs by design.
-# Changes to this set are a review red flag — revisit the contract.
-SHARED_FIELDS: frozenset[str] = frozenset(
-    {
-        "model",  # orch: detect model_type; engine: load weights
-        "stage_id",  # orch: route (headless); engine: identity
-        "log_stats",  # both want the flag
-        "stage_configs_path",  # orch: load legacy YAML; engine: may reference for validation
-    }
-)
+    @classmethod
+    def _peek_model(cls, args: list[str]) -> str | None:
+        """Extract model from raw CLI args before full preprocessing.
 
+        Handles:
+        1. ``--config config.yaml`` / ``--config=config.yaml`` → reads yaml['model']
+        2. ``--model foo/bar`` → promoted to positional by FlexibleArgumentParser
+        3. ``vllm serve foo/bar`` → first positional after subcommand
+        """
+        import yaml
 
-def orchestrator_field_names() -> frozenset[str]:
-    """Return the names of every field on OrchestratorArgs."""
-    return frozenset(f.name for f in fields(OrchestratorArgs))
+        current = list(args)
 
+        # Case 1: --config YAML (both --config <path> and --config=<path>)
+        for i, arg in enumerate(current):
+            path: str | None = None
+            if arg == "--config" and i + 1 < len(current):
+                path = current[i + 1]
+            elif arg.startswith("--config="):
+                path = arg.split("=", 1)[1]
+            if path:
+                try:
+                    with open(path) as fh:
+                        cfg = yaml.safe_load(fh)
+                    if isinstance(cfg, dict) and cfg.get("model"):
+                        return cfg["model"]
+                except Exception:
+                    pass
 
-def internal_blacklist_keys() -> frozenset[str]:
-    """Return the set of CLI keys that must never be forwarded as per-stage
-    engine overrides.
+        # Case 2: --model flag
+        for i, arg in enumerate(current):
+            if arg == "--model" and i + 1 < len(current):
+                return current[i + 1]
+            if arg.startswith("--model="):
+                return arg.split("=", 1)[1]
 
-    Derived from ``OrchestratorArgs`` fields minus ``SHARED_FIELDS``, so
-    adding a new orchestrator-owned flag is a one-line change to the
-    dataclass — this function updates automatically.
-    """
-    return orchestrator_field_names() - SHARED_FIELDS
+        # Case 3: positional model for "serve" subcommand
+        if current and current[0] == "serve" and len(current) > 1:
+            if not current[1].startswith("-"):
+                return current[1]
 
+        return None
 
-def split_kwargs(
-    kwargs: dict[str, Any],
-    *,
-    engine_cls: type | None = None,
-    user_typed: set[str] | None = None,
-    strict: bool = False,
-) -> tuple[OrchestratorArgs, dict[str, Any]]:
-    """Partition CLI kwargs into (orchestrator, engine) buckets.
+    def _peek_model_flat(self, args: list[str]) -> str | None:
+        """Peek model for flat-parser mode (no subparsers — api_server)."""
+        current = list(args)
+        if current and not current[0].startswith("-"):
+            return current[0]
+        return None
 
-    Args:
-        kwargs: Raw dict, typically ``vars(args)``.
-        engine_cls: Engine dataclass used to whitelist-filter the engine
-            bucket. Defaults to ``OmniEngineArgs``. Pass a custom class
-            for testing.
-        user_typed: Keys the user actually typed on the command line. Used
-            to warn when a user-typed flag is unclassifiable.
-        strict: If True, raise ``ValueError`` on ambiguous (double-classified
-            but not in ``SHARED_FIELDS``) fields. Default False to keep the
-            rollout non-breaking; flip to True in tests and CI.
+    @staticmethod
+    def _peek_stage_id(args: list[str]) -> int | None:
+        for i, arg in enumerate(args):
+            if arg == "--stage-id" and i + 1 < len(args):
+                try:
+                    return int(args[i + 1])
+                except (ValueError, IndexError):
+                    pass
+            if arg.startswith("--stage-id="):
+                try:
+                    return int(arg.split("=", 1)[1])
+                except ValueError:
+                    pass
+        return None
 
-    Returns:
-        ``(orchestrator_args, engine_kwargs)``. ``engine_kwargs`` has already
-        been whitelist-filtered against ``engine_cls`` — safe to pass directly
-        to ``engine_cls(**engine_kwargs)``.
-    """
-    if engine_cls is None:
-        engine_cls = OmniEngineArgs
+    @staticmethod
+    def _peek_deploy_config(args: list[str]) -> str | None:
+        """Peek --deploy-config from raw argv."""
+        for i, arg in enumerate(args):
+            if arg == "--deploy-config" and i + 1 < len(args):
+                return args[i + 1]
+            if arg.startswith("--deploy-config="):
+                return arg.split("=", 1)[1]
+        return None
 
-    orch_fields = orchestrator_field_names()
-    engine_fields = {f.name for f in fields(engine_cls)}
+    # ── Default injection ───────────────────────────────────────────────
 
-    orch_kwargs: dict[str, Any] = {}
-    engine_candidate: dict[str, Any] = {}
-    shared_values: dict[str, Any] = {}
-    unclassified: dict[str, Any] = {}
+    def _inject_model_defaults(
+        self,
+        model: str,
+        stage_id: int | None,
+        *,
+        deploy_config_path: str | None = None,
+    ) -> None:
+        """Load deploy YAML + pipeline topology; inject as ``action.default``.
 
-    for key, value in kwargs.items():
-        in_orch = key in orch_fields
-        in_engine = key in engine_fields
-        is_shared = key in SHARED_FIELDS
+        Pipeline-wide DeployConfig fields → ``action.default``.
+        Per-stage fields (headless) → ``action.default``.
+        Per-stage fields (normal serve) → collapsed into JSON default on
+        ``--stage-overrides``, stashed for post-parse deep-merge.
 
-        if is_shared:
-            shared_values[key] = value
-        elif in_orch and in_engine:
-            # Declared in both but not marked shared → ambiguous.
-            msg = (
-                f"Field {key!r} is defined on both OrchestratorArgs and "
-                f"{engine_cls.__name__} but is not in SHARED_FIELDS. "
-                f"This causes double-routing. Either remove the duplicate or "
-                f"add {key!r} to SHARED_FIELDS if the sharing is intentional."
-            )
-            if strict:
-                raise ValueError(msg)
-            logger.error(msg)
-            # Default: treat as orchestrator-only to preserve existing behavior.
-            orch_kwargs[key] = value
-        elif in_orch:
-            orch_kwargs[key] = value
-        elif in_engine:
-            engine_candidate[key] = value
+        Also loads ``PipelineConfig`` from registry and serialises its
+        per-stage topology into the ``stage_overrides`` JSON alongside
+        the deploy YAML per-stage values.
+        """
+        from dataclasses import fields as dc_fields
+        from pathlib import Path
+
+        from vllm_omni.config.stage_config import (
+            _DEPLOY_DIR,
+            _PIPELINE_REGISTRY,
+            DeployConfig,
+            StageConfigFactory,
+            StageDeployConfig,
+            load_deploy_config,
+        )
+
+        # Detect model_type + resolve deploy YAML path.
+        if deploy_config_path:
+            deploy_path = Path(deploy_config_path)
+            if not deploy_path.exists():
+                return
         else:
-            unclassified[key] = value
+            model_type, _hf_config = StageConfigFactory._auto_detect_model_type(model)
+            if not model_type:
+                return
+            deploy_path = _DEPLOY_DIR / f"{model_type}.yaml"
+            if not deploy_path.exists():
+                return
 
-    # Warn on user-typed but unclassifiable flags so we don't silently drop
-    # something the user cared about (fixes the class of bug that spawned #873).
-    if unclassified and user_typed:
-        user_typed_unknown = sorted(k for k in unclassified if k in user_typed)
-        if user_typed_unknown:
-            logger.warning(
-                "CLI flags not consumed by vllm-omni and dropped before "
-                "per-stage engine construction: %s. If these are vllm "
-                "frontend/uvicorn flags (host, port, ssl_*, api_key, …) this "
-                "is expected; otherwise check your spelling.",
-                user_typed_unknown,
-            )
+        self._omni_model_type = model_type if not deploy_config_path else None
 
-    # Engine bucket: shared + engine-only. We do NOT pass through unclassified
-    # fields — that's exactly the server/uvicorn noise we want to shed.
-    engine_kwargs = {**shared_values, **engine_candidate}
+        try:
+            deploy = load_deploy_config(deploy_path)
+        except Exception:
+            logger.warning("Failed to load deploy config from %s", deploy_path)
+            return
 
-    # Construct the orchestrator dataclass. Shared fields that OrchestratorArgs
-    # also declares get copied into its constructor.
-    orch_init: dict[str, Any] = dict(orch_kwargs)
-    for key, value in shared_values.items():
-        if key in orch_fields:
-            orch_init[key] = value
-    orch_args = OrchestratorArgs(**orch_init)
+        serve_parser = self._get_serve_subparser()
+        if serve_parser is None:
+            if self._subparsers is None:
+                serve_parser = self
+            else:
+                return
 
-    return orch_args, engine_kwargs
+        # ── Pipeline-wide: DeployConfig fields → action.default ──
+        for f in dc_fields(DeployConfig):
+            val = getattr(deploy, f.name)
+            if val is not None:
+                self._set_action_default(serve_parser, f.name, val)
+
+        # ── Load PipelineConfig from registry for topology ──
+        pipeline_key = deploy.pipeline or (self._omni_model_type if self._omni_model_type else None)
+        if pipeline_key and pipeline_key in _PIPELINE_REGISTRY:
+            self._omni_pipeline = _PIPELINE_REGISTRY[pipeline_key]
+        else:
+            self._omni_pipeline = None
+
+        # ── Build comprehensive stage_overrides from pipeline topology + deploy YAML ──
+        if stage_id is not None:
+            # Headless: set per-stage action.defaults directly from deploy YAML.
+            stage_dep = next((s for s in deploy.stages if s.stage_id == stage_id), None)
+            if stage_dep:
+                for f in dc_fields(StageDeployConfig):
+                    if f.name == "engine_extras":
+                        continue
+                    val = getattr(stage_dep, f.name)
+                    if val is not None:
+                        self._set_action_default(serve_parser, f.name, val)
+                # Also inject pipeline topology for this stage.
+                if self._omni_pipeline:
+                    ps = self._omni_pipeline.get_stage(stage_id)
+                    if ps:
+                        _inject_stage_topology_defaults(self, serve_parser, ps, stage_dep)
+        else:
+            # Normal serve: build stage_overrides merging pipeline topology + deploy YAML.
+            stage_overrides: dict[str, dict[str, Any]] = _build_unified_stage_overrides(deploy, self._omni_pipeline)
+            if stage_overrides:
+                yaml_json = json.dumps(stage_overrides, sort_keys=True)
+                self._set_action_default(serve_parser, "stage_overrides", yaml_json)
+                self._yaml_stage_overrides = stage_overrides
+
+    @staticmethod
+    def _set_action_default(parser: argparse.ArgumentParser, dest: str, value: Any) -> None:
+        for action in parser._actions:
+            if action.dest == dest:
+                action.default = value
+                break
+
+    def _get_serve_subparser(self) -> argparse.ArgumentParser | None:
+        if self._subparsers is None:
+            return None
+        subparsers_action = self._subparsers._group_actions[0]
+        return subparsers_action.choices.get("serve")
 
 
-def derive_server_dests_from_vllm_parser() -> frozenset[str]:
-    """Derive the set of argparse dests that belong to vllm's frontend/server.
+# ============================================================================
+# OmniArgumentParser helpers
+# ============================================================================
 
-    Returns every dest registered by ``make_arg_parser`` that is NOT a field
-    of ``OmniEngineArgs`` and NOT a field of ``OrchestratorArgs``. Useful for
-    CI tests to assert all CLI flags are classifiable without maintaining
-    a hardcoded server list.
 
-    Returns empty frozenset if vllm's parser cannot be built (e.g. in a
-    minimal test environment).
+def _inject_stage_topology_defaults(
+    parser: OmniArgumentParser,
+    serve_parser: argparse.ArgumentParser,
+    ps: _StagePipelineConfig,
+    ds: _StageDeployConfig | None,
+) -> None:
+    """Inject per-stage topology fields from ``StagePipelineConfig`` into the parser.
+
+    Only used in headless mode for the selected stage.
     """
-    try:
-        from vllm.entrypoints.openai.cli_args import make_arg_parser
-        from vllm.utils.argparse_utils import FlexibleArgumentParser
-    except ImportError:
-        logger.debug("Cannot import vllm parser — server-dest derivation skipped")
-        return frozenset()
-
-    try:
-        parser = make_arg_parser(FlexibleArgumentParser())
-        all_dests = {a.dest for a in parser._actions if a.dest and a.dest != "help"}
-    except Exception as exc:
-        logger.debug("Failed to build vllm parser: %s", exc)
-        return frozenset()
-
-    engine_fields = {f.name for f in fields(OmniEngineArgs)}
-    orch_fields = orchestrator_field_names()
-
-    return frozenset(all_dests - engine_fields - orch_fields - SHARED_FIELDS)
+    mapping = {
+        "model_arch": ps.model_arch,
+        "engine_output_type": ps.engine_output_type,
+        "hf_config_name": ps.hf_config_name,
+        "custom_process_next_stage_input_func": ps.custom_process_next_stage_input_func,
+        "model_subdir": ps.model_subdir,
+        "tokenizer_subdir": ps.tokenizer_subdir,
+        "model_stage": ps.model_stage,
+    }
+    for dest, val in mapping.items():
+        if val is not None:
+            parser._set_action_default(serve_parser, dest, val)
 
 
-def orchestrator_args_from_argparse(args: Any) -> OrchestratorArgs:
-    """Build an ``OrchestratorArgs`` from an ``argparse.Namespace``.
+def _build_unified_stage_overrides(
+    deploy: Any,  # DeployConfig
+    pipeline: Any | None,  # PipelineConfig | None
+) -> dict[str, dict[str, Any]]:
+    """Build per-stage overrides dict merging pipeline topology + deploy YAML values."""
+    deploy_by_id: dict[int, Any] = {s.stage_id: s for s in deploy.stages}
 
-    Only copies attributes that exist on the namespace — missing fields fall
-    back to the dataclass default. Useful when the full parser is already
-    built and ``vars(args)`` would include noise.
+    result: dict[str, dict[str, Any]] = {}
+
+    # Determine stages from pipeline (primary) or deploy YAML (fallback).
+    if pipeline is not None:
+        for ps in pipeline.stages:
+            ds = deploy_by_id.get(ps.stage_id)
+            entry = _build_one_stage_entry(ps, ds, deploy, _PIPELINE_WIDE_ENGINE_FIELDS)
+            result[str(ps.stage_id)] = entry
+    else:
+        # No pipeline — stages defined purely by deploy YAML.
+        for ds in deploy.stages:
+            entry = _build_deploy_only_stage_entry(ds, deploy, _PIPELINE_WIDE_ENGINE_FIELDS)
+            result[str(ds.stage_id)] = entry
+
+    return result
+
+
+def _build_one_stage_entry(
+    ps: _StagePipelineConfig,
+    ds: _StageDeployConfig | None,
+    deploy: Any,  # DeployConfig
+    pipeline_wide_fields: tuple[str, ...],
+) -> dict[str, Any]:
+    """Build one stage override entry from pipeline topology + deploy YAML."""
+    from dataclasses import fields as dc_fields
+
+    # Map execution_type → stage_type + worker_type.
+    stage_type_str = "llm"
+    worker_type = None
+    if ps.execution_type == _StageExecutionType.DIFFUSION:
+        stage_type_str = "diffusion"
+    elif ps.execution_type == _StageExecutionType.LLM_GENERATION:
+        worker_type = "generation"
+
+    engine_args: dict[str, Any] = {}
+
+    # Pipeline topology fields.
+    for name in ("model_arch", "engine_output_type", "hf_config_name", "model_subdir", "tokenizer_subdir"):
+        val = getattr(ps, name, None)
+        if val is not None:
+            engine_args[name] = val
+    engine_args["model_stage"] = ps.model_stage
+    if worker_type:
+        engine_args["worker_type"] = worker_type
+
+    # Pipeline-wide deploy values.
+    for name in pipeline_wide_fields:
+        val = getattr(deploy, name, None)
+        if val is not None:
+            engine_args[name] = val
+
+    # Deploy YAML async_chunk.
+    engine_args["async_chunk"] = bool(deploy.async_chunk)
+
+    # Per-stage deploy values.
+    if ds is not None:
+        for f in dc_fields(_StageDeployConfig):
+            if f.name in ("engine_extras",):
+                continue
+            val = getattr(ds, f.name)
+            if val is not None:
+                engine_args[f.name] = val
+
+    entry: dict[str, Any] = {
+        "stage_type": stage_type_str,
+        "engine_args": engine_args,
+    }
+
+    # Stage-level overrides from pipeline topology.
+    for name in (
+        "is_comprehension",
+        "requires_multimodal_data",
+        "custom_process_input_func",
+        "prompt_expand_func",
+        "cfg_kv_collect_func",
+        "final_output",
+        "final_output_type",
+        "omni_kv_config",
+        "sampling_constraints",
+        "extras",
+    ):
+        val = getattr(ps, name, None)
+        if val or (isinstance(val, bool) and val):
+            entry[name] = val
+
+    entry["input_sources"] = list(ps.input_sources)
+
+    # Deploy YAML extras.
+    if ds is not None:
+        entry["default_sampling_params"] = ds.default_sampling_params or {}
+        entry.setdefault("num_replicas", ds.num_replicas)
+        entry.setdefault("devices", ds.devices)
+
+        runtime: dict[str, Any] = {}
+        if ds.devices is not None:
+            runtime["devices"] = ds.devices
+        runtime["num_replicas"] = ds.num_replicas
+        runtime["requires_multimodal_data"] = ps.requires_multimodal_data
+        entry["runtime"] = runtime
+
+        # PD flags from engine_extras.
+        extras = ds.engine_extras if ds.engine_extras else {}
+        if extras.get("is_prefill_only"):
+            entry["is_prefill_only"] = True
+        if extras.get("is_decode_only"):
+            entry["is_decode_only"] = True
+
+        # Input/output connectors.
+        if ds.output_connectors:
+            entry["output_connectors"] = ds.output_connectors
+        if ds.input_connectors:
+            entry["input_connectors"] = ds.input_connectors
+
+    return entry
+
+
+def _build_deploy_only_stage_entry(
+    ds: _StageDeployConfig,
+    deploy: Any,  # DeployConfig
+    pipeline_wide_fields: tuple[str, ...],
+) -> dict[str, Any]:
+    """Build a stage override entry from deploy YAML only (no pipeline)."""
+    from dataclasses import fields as dc_fields
+
+    stage_type_str = "llm"  # default; can be overridden in engine_extras
+    engine_args: dict[str, Any] = {}
+
+    # Pipeline-wide deploy values.
+    for name in pipeline_wide_fields:
+        val = getattr(deploy, name, None)
+        if val is not None:
+            engine_args[name] = val
+
+    engine_args["async_chunk"] = bool(deploy.async_chunk)
+
+    # Per-stage deploy values.
+    for f in dc_fields(_StageDeployConfig):
+        if f.name in ("engine_extras",):
+            continue
+        val = getattr(ds, f.name)
+        if val is not None:
+            engine_args[f.name] = val
+
+    # engine_extras may contain stage_type override.
+    extras = ds.engine_extras if ds.engine_extras else {}
+    if extras.get("stage_type"):
+        stage_type_str = extras["stage_type"]
+
+    entry: dict[str, Any] = {
+        "stage_type": stage_type_str,
+        "engine_args": engine_args,
+        "default_sampling_params": ds.default_sampling_params or {},
+        "num_replicas": ds.num_replicas,
+    }
+
+    runtime: dict[str, Any] = {}
+    if ds.devices is not None:
+        runtime["devices"] = ds.devices
+    runtime["num_replicas"] = ds.num_replicas
+    entry["runtime"] = runtime
+
+    for key in (
+        "is_prefill_only",
+        "is_decode_only",
+        "is_comprehension",
+        "custom_process_input_func",
+        "final_output",
+        "final_output_type",
+    ):
+        if key in extras:
+            entry[key] = extras[key]
+
+    if extras.get("input_sources"):
+        entry["input_sources"] = extras["input_sources"]
+
+    return entry
+
+
+# ============================================================================
+# Post-parse deep merge
+# ============================================================================
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge *override* into *base*; override keys win.
+
+    Stage IDs are normalised to strings to avoid duplicate keys when
+    callers provide integer keys alongside YAML's string keys.
     """
-    kwargs: dict[str, Any] = {}
-    for f in fields(OrchestratorArgs):
-        if hasattr(args, f.name):
-            value = getattr(args, f.name)
-            if value is not None or f.default is None:
-                kwargs[f.name] = value
-    return OrchestratorArgs(**kwargs)
+    result = dict(base)
+    for key, val in override.items():
+        key_str = str(key)
+        if key_str in result and isinstance(result[key_str], dict) and isinstance(val, dict):
+            result[key_str] = _deep_merge(result[key_str], val)
+        else:
+            result[key_str] = val
+    return result
 
 
-def nullify_stage_engine_defaults(parser: argparse.ArgumentParser) -> None:
-    """Reset stage-level engine flag defaults to ``None``; preserve real
-    default in help text. Only deploy-YAML override fields are touched.
-    Idempotent."""
-    from vllm_omni.config.stage_config import deploy_override_field_names
+# ============================================================================
+# Exports
+# ============================================================================
 
-    override_dests = deploy_override_field_names()
 
-    for action in parser._actions:
-        if action.dest in ("help", "version") or not action.option_strings:
-            continue
-        if action.dest not in override_dests:
-            continue
-        if action.default is None or action.default is argparse.SUPPRESS:
-            continue
-        if action.help and "(default:" not in action.help and "%(default)" not in action.help:
-            action.help = f"{action.help} (default: {action.default})"
-        action.default = None
-
-    parser._omni_nullified = True  # type: ignore[attr-defined]
+__all__ = [
+    "OmniEngineArgs",
+    "OmniAsyncEngineArgs",
+    "OmniArgumentParser",
+    "register_omni_models_to_vllm",
+]

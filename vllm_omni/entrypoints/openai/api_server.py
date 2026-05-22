@@ -2945,25 +2945,15 @@ async def omni_wakeup(request: OmniWakeupRequest, raw_request: Request):
 
 
 if __name__ == "__main__":
-    import argparse
     import asyncio
 
     from vllm.entrypoints.openai.cli_args import make_arg_parser
 
-    from vllm_omni.engine.arg_utils import nullify_stage_engine_defaults
+    from vllm_omni.engine.arg_utils import OmniArgumentParser, OmniEngineArgs
 
-    parser = argparse.ArgumentParser(description="vLLM-Omni OpenAI-Compatible REST API server")
+    parser = OmniArgumentParser(description="vLLM-Omni OpenAI-Compatible REST API server")
     parser = make_arg_parser(parser)
-    registered_flags = set()
-    for action in parser._actions:
-        registered_flags.update(action.option_strings)
-    if "--omni" not in registered_flags:
-        parser.add_argument("--omni", action="store_true", default=False, help="Enable vLLM-Omni mode.")
-    if "--enable-sleep-mode" not in registered_flags:
-        parser.add_argument(
-            "--enable-sleep-mode", action="store_true", default=False, help="Enable GPU memory pool for sleep mode."
-        )
-    nullify_stage_engine_defaults(parser)
+    OmniEngineArgs.add_cli_args(parser, omni_args_only=True)
     args = parser.parse_args()
     if not hasattr(args, "model_tag"):
         setattr(args, "model_tag", args.model)

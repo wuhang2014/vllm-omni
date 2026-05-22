@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import copy
-import dataclasses
 import json
 import os
 import queue
@@ -20,22 +19,19 @@ import uuid
 import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import janus
 import torch
 from omegaconf import OmegaConf
 from vllm import envs as vllm_envs
-from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 
-from vllm_omni.config.stage_config import strip_parent_engine_args
-from vllm_omni.diffusion.data import DiffusionParallelConfig, parse_attention_config
-from vllm_omni.diffusion.diffusion_engine import supports_audio_output
+from vllm_omni.config import VllmOmniConfig
 from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
 from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
 from vllm_omni.diffusion.stage_diffusion_proc import (
@@ -107,7 +103,6 @@ from vllm_omni.engine.stage_pool import StagePool, StagePoolClient
 from vllm_omni.entrypoints.pd_utils import PDDisaggregationMixin
 from vllm_omni.entrypoints.utils import (
     inject_omni_kv_config,
-    load_and_resolve_stage_configs,
 )
 from vllm_omni.inputs.data import OmniSamplingParams
 from vllm_omni.platforms import current_omni_platform
@@ -125,41 +120,6 @@ class StageRuntimeInfo:
     final_output: bool
     final_output_type: FinalOutputModalityType | None
     stage_type: str
-
-
-# ============================================================================
-# Parent-EngineArgs field-routing contracts (consumed by
-# AsyncOmniEngine._strip_parent_engine_args when ``stage_configs_path`` is set).
-# ============================================================================
-
-# Fields that must survive the "equal to default → strip" filter because
-# diffusion stages need them even when equal to vllm's default value
-# (e.g. colocate worker setup relies on worker_extension_cls being forwarded).
-_PARENT_ARGS_KEEP: frozenset[str] = frozenset(
-    {
-        "worker_extension_cls",
-        "allowed_local_media_path",
-        "allowed_media_domains",
-        # Legacy stage-config YAMLs may intentionally leave parallel or
-        # distributed knobs unspecified at the stage level and rely on
-        # top-level CLI values to fill them in during the per-stage merge.
-        # Keep these fields so stages that omit them can inherit CLI values,
-        # while stages with explicit YAML values still win because the legacy
-        # stage-config loader prefers stage-local engine args.
-        "tensor_parallel_size",
-    }
-)
-
-# Omni orchestrator-level fields consumed by ``_resolve_stage_configs`` that
-# must never leak into per-stage EngineArgs (``stage_configs_path`` would
-# trigger the ``create_model_config`` guard).
-_PARENT_ARGS_STRIP: frozenset[str] = frozenset({"stage_configs_path"})
-
-
-# Fields always populated by callers (via ``from_cli_args`` / ``asdict``) so
-# their presence as an override is never a surprise — suppress the
-# "override ignored" warning for these.
-_PARENT_ARGS_NO_WARN: frozenset[str] = frozenset({"model"})
 
 
 def _inject_global_id(target: Any, request_id: str) -> None:
@@ -262,6 +222,8 @@ class AsyncOmniEngine:
     def __init__(
         self,
         model: str,
+        *,
+        omni_config: VllmOmniConfig | None = None,
         engine_args: OmniEngineArgs | None = None,
         stage_init_timeout: int = 300,
         init_timeout: int = 600,
@@ -273,29 +235,32 @@ class AsyncOmniEngine:
         self.diffusion_batch_size = diffusion_batch_size
         startup_timeout = int(init_timeout)
 
-        logger.info(f"[AsyncOmniEngine] Initializing with model {model}")
+        logger.info("[AsyncOmniEngine] Initializing with model %s", model)
 
-        # Merge tracked engine_args fields into kwargs; explicit kwargs take priority.
-        if engine_args is not None:
-            if not hasattr(engine_args, "_explicit_fields"):
-                raise TypeError(
-                    "engine_args=OmniEngineArgs(...) is ambiguous under "
-                    "sentinel-default precedence. Use "
-                    "OmniEngineArgs.create(**explicit) or pass explicit kwargs "
-                    "directly."
-                )
-            ea_dict = engine_args.explicit_kwargs()
-            # Remove model since it is passed as a positional arg already.
-            ea_dict.pop("model", None)
-            kwargs = {**ea_dict, **kwargs}
+        # Build or receive the unified config.
+        if omni_config is not None:
+            self.omni_config = omni_config
+        elif engine_args is not None:
+            self.omni_config = engine_args.create_omni_config(model)
+        else:
+            # Backward compat: build from kwargs.
+            from vllm_omni.engine.arg_utils import OmniEngineArgs as _EA  # noqa: N814
+            from vllm_omni.entrypoints.omni_base import _inject_deploy_defaults
 
-        self.tokenizer: str | None = kwargs.get("tokenizer")
+            _inject_deploy_defaults(model, kwargs)
+            engine_args = _EA.from_kwargs(model, **kwargs)
+            self.omni_config = engine_args.create_omni_config(model)
 
-        # ------------------------------------------------------------------ #
-        # Single-stage mode detection                                        #
-        # ------------------------------------------------------------------ #
-        # Single-stage mode is enabled when the caller explicitly passes      #
-        # single_stage_mode=True, or when a stage_id is provided in the args. #
+        # Populate legacy attributes from omni_config.
+        self.async_chunk = self.omni_config.async_chunk
+        self.num_stages = self.omni_config.num_stages
+
+        self.stage_configs = list(self.omni_config.stages)
+        self.config_path = None
+
+        self.tokenizer: str | None = getattr(engine_args, "tokenizer", None) if engine_args else kwargs.get("tokenizer")
+
+        # Single-stage mode detection
         _stage_id_kwarg = kwargs.get("stage_id")
         if isinstance(_stage_id_kwarg, int) and not single_stage_mode:
             single_stage_mode = True
@@ -308,9 +273,7 @@ class AsyncOmniEngine:
         self._omni_master_port: int | None = kwargs.get("omni_master_port")
         self._omni_master_server: OmniMasterServer | None = None
 
-        # New omni-coordinator flags. Consumed only in single_stage_mode.
-        # ``omni_dp_size_local`` is process-local: each invocation (head and
-        # every headless) launches that many replicas for its own stage.
+        # Omni-coordinator flags.
         self._omni_dp_size_local: int = int(kwargs.get("omni_dp_size_local") or 1)
         if self._omni_dp_size_local < 1:
             raise ValueError(f"--omni-dp-size-local must be >= 1, got {self._omni_dp_size_local}")
@@ -318,11 +281,7 @@ class AsyncOmniEngine:
         self._omni_heartbeat_timeout: float = float(kwargs.get("omni_heartbeat_timeout") or 30.0)
         if self._omni_heartbeat_timeout <= 0:
             raise ValueError(f"--omni-heartbeat-timeout must be > 0, got {self._omni_heartbeat_timeout}")
-        # Coordinator runtime (head-distributed only).
         self._coordinator_runtime: Any | None = None
-        # Per-stage construction context, captured after _initialize_stages
-        # and used by ``_build_remote_replica`` (the RemoteReplicaFactory
-        # passed to Orchestrator) when a headless replica registers.
         self._stage_remote_factory_contexts: dict[int, StageRemoteFactoryContext] = {}
 
         if single_stage_mode:
@@ -333,12 +292,9 @@ class AsyncOmniEngine:
                 self._omni_master_port,
             )
 
-        self.config_path, self.stage_configs = self._resolve_stage_configs(model, kwargs)
         self._validate_single_stage_mode_replica_constraints()
 
         self.num_stages = len(self.stage_configs)
-        stage0_args = getattr(self.stage_configs[0], "engine_args", None) if self.num_stages > 0 else None
-        self.async_chunk = bool(getattr(stage0_args, "async_chunk", False))
         self.stage_pools: list[StagePool] = []
         self.stage_clients: list[StageClient] = []  # logical-stage view for external readers
         self.input_processor: InputProcessor | None = None
@@ -1832,327 +1788,7 @@ class AsyncOmniEngine:
         }
 
     @staticmethod
-    def _create_default_diffusion_stage_cfg(kwargs: dict[str, Any]) -> list:
-        """Create a default single-stage diffusion config from kwargs."""
-        # We temporally create a default config for diffusion stage.
-        # In the future, we should merge the default config with the user-provided config.
-        normalized_kwargs = dict(kwargs)
-        default_sampling_params = normalized_kwargs.get("default_sampling_params")
-        if isinstance(default_sampling_params, str):
-            try:
-                default_sampling_params = json.loads(default_sampling_params)
-            except json.JSONDecodeError:
-                logger.warning("Invalid default_sampling_params JSON, ignoring stage defaults.")
-                default_sampling_params = None
-        if not isinstance(default_sampling_params, dict):
-            default_sampling_params = None
-        stage_default_sampling_params = default_sampling_params.get("0", {}) if default_sampling_params else {}
-        if normalized_kwargs.get("dtype") is None:
-            normalized_kwargs["dtype"] = "auto"
-
-        # TODO: hack, convert dtype to string to avoid non-premitive omegaconf create error.
-        if "dtype" in normalized_kwargs and not isinstance(normalized_kwargs["dtype"], str):
-            if not isinstance(normalized_kwargs["dtype"], torch.dtype):
-                raise TypeError(
-                    f"Provided dtype must be a string or torch.dtype, got {type(normalized_kwargs['dtype']).__name__}"
-                )
-            normalized_kwargs["dtype"] = str(normalized_kwargs["dtype"]).removeprefix("torch.")
-
-        cache_backend = normalized_kwargs.get("cache_backend", "none")
-        cache_config = AsyncOmniEngine._normalize_cache_config(
-            cache_backend,
-            normalized_kwargs.get("cache_config", None),
-        )
-
-        parallel_config = normalized_kwargs.get("parallel_config")
-        if isinstance(parallel_config, dict):
-            parallel_config = DiffusionParallelConfig.from_dict(parallel_config)
-        if parallel_config is None:
-            ulysses_degree = normalized_kwargs.get("ulysses_degree") or 1
-            ring_degree = normalized_kwargs.get("ring_degree") or 1
-            ulysses_mode = normalized_kwargs.get("ulysses_mode") or "strict"
-            sequence_parallel_size = normalized_kwargs.get("sequence_parallel_size")
-            pipeline_parallel_size = normalized_kwargs.get("pipeline_parallel_size") or 1
-            data_parallel_size = normalized_kwargs.get("data_parallel_size") or 1
-            tensor_parallel_size = normalized_kwargs.get("tensor_parallel_size") or 1
-            cfg_parallel_size = normalized_kwargs.get("cfg_parallel_size") or 1
-            pipeline_parallel_size = normalized_kwargs.get("pipeline_parallel_size") or 1
-            vae_patch_parallel_size = normalized_kwargs.get("vae_patch_parallel_size") or 1
-            enable_expert_parallel = normalized_kwargs.get("enable_expert_parallel") or False
-            use_hsdp = normalized_kwargs.get("use_hsdp", False)
-            hsdp_shard_size = normalized_kwargs.get("hsdp_shard_size", -1)
-            hsdp_replicate_size = normalized_kwargs.get("hsdp_replicate_size", 1)
-            if sequence_parallel_size is None:
-                sequence_parallel_size = ulysses_degree * ring_degree
-
-            parallel_config = DiffusionParallelConfig(
-                pipeline_parallel_size=pipeline_parallel_size,
-                data_parallel_size=data_parallel_size,
-                tensor_parallel_size=tensor_parallel_size,
-                enable_expert_parallel=enable_expert_parallel,
-                sequence_parallel_size=sequence_parallel_size,
-                ulysses_degree=ulysses_degree,
-                ring_degree=ring_degree,
-                ulysses_mode=ulysses_mode,
-                cfg_parallel_size=cfg_parallel_size,
-                vae_patch_parallel_size=vae_patch_parallel_size,
-                use_hsdp=use_hsdp,
-                hsdp_shard_size=hsdp_shard_size,
-                hsdp_replicate_size=hsdp_replicate_size,
-            )
-
-        num_devices = max(1, int(parallel_config.world_size))
-        devices = ",".join(str(i) for i in range(num_devices))
-        model_class_name = kwargs.get("model_class_name", None)
-        final_output_type = "audio" if model_class_name and supports_audio_output(model_class_name) else "image"
-
-        attention_config = None
-        if (
-            kwargs.get("diffusion_attention_config") is not None
-            or kwargs.get("diffusion_attention_backend") is not None
-        ):
-            attention_config = parse_attention_config(
-                kwargs.get("diffusion_attention_config"),
-                attention_backend=kwargs.get("diffusion_attention_backend"),
-            )
-
-        stage_engine_args = {
-            "max_num_seqs": kwargs.get("max_num_seqs") or 1,
-            "parallel_config": parallel_config,
-            "model_class_name": kwargs.get("model_class_name", None),
-            "additional_config": kwargs.get("additional_config", None),
-            "step_execution": kwargs.get("step_execution", False),
-            "vae_use_slicing": kwargs.get("vae_use_slicing", False),
-            "vae_use_tiling": kwargs.get("vae_use_tiling", False),
-            "cache_backend": cache_backend,
-            "cache_config": cache_config,
-            "enable_cache_dit_summary": kwargs.get("enable_cache_dit_summary", False),
-            "enable_cpu_offload": kwargs.get("enable_cpu_offload", False),
-            "enable_layerwise_offload": kwargs.get("enable_layerwise_offload", False),
-            "enforce_eager": False if kwargs.get("enforce_eager") is None else kwargs.get("enforce_eager"),
-            "boundary_ratio": kwargs.get("boundary_ratio", None),
-            "flow_shift": kwargs.get("flow_shift", None),
-            "diffusion_load_format": kwargs.get("diffusion_load_format", "default"),
-            "custom_pipeline_args": kwargs.get("custom_pipeline_args", None),
-            "worker_extension_cls": kwargs.get("worker_extension_cls", None),
-            "trust_remote_code": (False if kwargs.get("trust_remote_code") is None else kwargs["trust_remote_code"]),
-            "distributed_executor_backend": (
-                "mp" if kwargs.get("distributed_executor_backend") is None else kwargs["distributed_executor_backend"]
-            ),
-            "enable_sleep_mode": kwargs.get("enable_sleep_mode", False),
-            "enable_multithread_weight_load": kwargs.get("enable_multithread_weight_load", True),
-            "num_weight_load_threads": kwargs.get("num_weight_load_threads", 4),
-            "quantization": kwargs.get("quantization", None),
-            "diffusion_kv_cache_dtype": kwargs.get("diffusion_kv_cache_dtype", None),
-            "diffusion_kv_cache_skip_steps": kwargs.get("diffusion_kv_cache_skip_steps", None),
-            "diffusion_kv_cache_skip_layers": kwargs.get("diffusion_kv_cache_skip_layers", None),
-            **({"diffusion_attention_config": attention_config} if attention_config is not None else {}),
-            "force_cutlass_fp8": bool(kwargs.get("force_cutlass_fp8", False)),
-            "enable_diffusion_pipeline_profiler": kwargs.get("enable_diffusion_pipeline_profiler", False),
-            "enable_ar_profiler": kwargs.get("enable_ar_profiler", False),
-            **(
-                {
-                    "profiler_config": asdict(kwargs["profiler_config"])
-                    if hasattr(kwargs["profiler_config"], "__dataclass_fields__")
-                    else kwargs["profiler_config"]
-                }
-                if kwargs.get("profiler_config") is not None
-                else {}
-            ),
-        }
-        # Only set dtype if it was already explicitly passed and normalized
-        if "dtype" in normalized_kwargs:
-            stage_engine_args["dtype"] = normalized_kwargs["dtype"]
-
-        # New split fields for diffusers adapter kwargs.
-        if kwargs.get("diffusers_load_kwargs") is not None:
-            stage_engine_args["diffusers_load_kwargs"] = kwargs["diffusers_load_kwargs"]
-        if kwargs.get("diffusers_call_kwargs") is not None:
-            stage_engine_args["diffusers_call_kwargs"] = kwargs["diffusers_call_kwargs"]
-
-        default_stage_cfg = [
-            {
-                "stage_id": 0,
-                "stage_type": "diffusion",
-                "runtime": {
-                    "process": True,
-                    "devices": devices,
-                },
-                "engine_args": stage_engine_args,
-                "default_sampling_params": stage_default_sampling_params,
-                "final_output": True,
-                "final_output_type": final_output_type,
-            }
-        ]
-        default_stage_cfg[0]["engine_args"]["model_stage"] = "diffusion"
-        return default_stage_cfg
-
     @staticmethod
-    def _strip_single_engine_args(kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Remove parent ``EngineArgs`` fields from *kwargs*.
-
-        When ``stage_configs_path`` is set, per-stage engine args are defined
-        in the YAML.  Top-level single-engine fields (``compilation_config``,
-        ``tensor_parallel_size``, …) must not leak into per-stage configs via
-        the ``base_engine_args`` merge in ``load_stage_configs_from_yaml`` —
-        they can cause type errors (e.g. ``compilation_config`` as a JSON
-        string rejected by ``VllmConfig``) or silently override YAML values.
-
-        Logs a warning for any parent field whose value differs from the
-        dataclass default, so users know their explicit overrides are ignored.
-        See the module-level ``_PARENT_ARGS_*`` constants for the routing
-        contracts this method enforces.
-        """
-        parent_fields: dict[str, dataclasses.Field] = {f.name: f for f in dataclasses.fields(EngineArgs)}
-        result, overridden = strip_parent_engine_args(
-            kwargs,
-            parent_fields=parent_fields,
-            keep_keys=_PARENT_ARGS_KEEP,
-            strip_keys=_PARENT_ARGS_STRIP,
-            no_warn_keys=_PARENT_ARGS_NO_WARN,
-        )
-
-        if overridden:
-            logger.warning(
-                "stage_configs_path is set — the following top-level engine "
-                "args are ignored (per-stage YAML takes precedence): %s",
-                ", ".join(sorted(overridden)),
-            )
-
-        return result
-
-    def _resolve_stage_configs(self, model: str, kwargs: dict[str, Any]) -> tuple[str, list[Any]]:
-        """Resolve stage configs and inject defaults shared by orchestrator/headless."""
-
-        stage_configs_path = kwargs.get("stage_configs_path", None)
-        deploy_config_path = kwargs.pop("deploy_config", None)
-        stage_overrides_json = kwargs.pop("stage_overrides", None)
-        kwargs.pop("_cli_explicit_keys", None)
-        explicit_stage_configs = kwargs.pop("stage_configs", None)
-        if explicit_stage_configs is not None:
-            logger.warning(
-                "`stage_configs` is not part of the public API. "
-                "Ignoring it and resolving stages from stage_configs_path/model factory."
-            )
-
-        if stage_configs_path is not None:
-            base_kwargs = self._strip_single_engine_args(kwargs)
-        else:
-            base_kwargs = kwargs
-
-        # Parse --stage-overrides JSON string if provided
-        stage_overrides = None
-        if stage_overrides_json:
-            if isinstance(stage_overrides_json, str):
-                try:
-                    stage_overrides = json.loads(stage_overrides_json)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(
-                        f"--stage-overrides is not valid JSON: {exc}. Got: {stage_overrides_json!r}"
-                    ) from exc
-            else:
-                stage_overrides = stage_overrides_json
-
-        config_path, stage_configs = load_and_resolve_stage_configs(
-            model,
-            stage_configs_path,
-            base_kwargs,
-            default_stage_cfg_factory=lambda: self._create_default_diffusion_stage_cfg(kwargs),
-            deploy_config_path=deploy_config_path,
-            stage_overrides=stage_overrides,
-        )
-
-        # Inject diffusion LoRA-related knobs from kwargs if not present in the stage config.
-        for cfg in stage_configs:
-            try:
-                if not hasattr(cfg, "engine_args") or cfg.engine_args is None:
-                    cfg.engine_args = OmegaConf.create({})
-                global_sleep_mode = kwargs.get("enable_sleep_mode")
-                if global_sleep_mode is not None:
-                    if not hasattr(cfg.engine_args, "enable_sleep_mode") or cfg.engine_args.enable_sleep_mode is None:
-                        cfg.engine_args.enable_sleep_mode = global_sleep_mode
-                if getattr(cfg, "stage_type", None) != "diffusion":
-                    continue
-                if not hasattr(cfg, "engine_args") or cfg.engine_args is None:
-                    cfg.engine_args = OmegaConf.create({})
-                additional_config = kwargs.get("additional_config")
-                if additional_config is not None:
-                    current_additional_config = getattr(cfg.engine_args, "additional_config", None)
-                    if current_additional_config in (None, {}):
-                        cfg.engine_args.additional_config = additional_config
-                if kwargs.get("lora_path") is not None:
-                    if not hasattr(cfg.engine_args, "lora_path") or cfg.engine_args.lora_path is None:
-                        cfg.engine_args.lora_path = kwargs["lora_path"]
-                lora_scale = kwargs.get("lora_scale")
-                if lora_scale is None:
-                    # Backwards compatibility for older callers.
-                    lora_scale = kwargs.get("static_lora_scale")
-                if lora_scale is not None:
-                    if not hasattr(cfg.engine_args, "lora_scale") or cfg.engine_args.lora_scale is None:
-                        cfg.engine_args.lora_scale = lora_scale
-                if (
-                    kwargs.get("diffusion_attention_config") is not None
-                    or kwargs.get("diffusion_attention_backend") is not None
-                ):
-                    has_stage_attention = (
-                        hasattr(cfg.engine_args, "diffusion_attention_config")
-                        and cfg.engine_args.diffusion_attention_config is not None
-                    )
-                    if not has_stage_attention:
-                        cfg.engine_args.diffusion_attention_config = parse_attention_config(
-                            kwargs.get("diffusion_attention_config"),
-                            attention_backend=kwargs.get("diffusion_attention_backend"),
-                        )
-                quantization_config = kwargs.get("quantization_config")
-                if quantization_config is not None:
-                    if (
-                        not hasattr(cfg.engine_args, "quantization_config")
-                        or cfg.engine_args.quantization_config is None
-                    ):
-                        cfg.engine_args.quantization_config = quantization_config
-                # Inject profiler flags for diffusion stages
-                for profiler_key in (
-                    "enable_diffusion_pipeline_profiler",
-                    "enable_ar_profiler",
-                ):
-                    val = kwargs.get(profiler_key)
-                    if val:
-                        if not hasattr(cfg.engine_args, profiler_key) or not getattr(
-                            cfg.engine_args, profiler_key, False
-                        ):
-                            setattr(cfg.engine_args, profiler_key, val)
-                quantization = kwargs.get("quantization")
-                if quantization is not None:
-                    if not hasattr(cfg.engine_args, "quantization") or cfg.engine_args.quantization is None:
-                        cfg.engine_args.quantization = quantization
-                diffusion_kv_cache_dtype = kwargs.get("diffusion_kv_cache_dtype")
-                if diffusion_kv_cache_dtype is not None:
-                    if (
-                        not hasattr(cfg.engine_args, "diffusion_kv_cache_dtype")
-                        or cfg.engine_args.diffusion_kv_cache_dtype is None
-                    ):
-                        cfg.engine_args.diffusion_kv_cache_dtype = diffusion_kv_cache_dtype
-                diffusion_kv_cache_skip_steps = kwargs.get("diffusion_kv_cache_skip_steps")
-                if diffusion_kv_cache_skip_steps is not None:
-                    if (
-                        not hasattr(cfg.engine_args, "diffusion_kv_cache_skip_steps")
-                        or cfg.engine_args.diffusion_kv_cache_skip_steps is None
-                    ):
-                        cfg.engine_args.diffusion_kv_cache_skip_steps = diffusion_kv_cache_skip_steps
-                diffusion_kv_cache_skip_layers = kwargs.get("diffusion_kv_cache_skip_layers")
-                if diffusion_kv_cache_skip_layers is not None:
-                    if (
-                        not hasattr(cfg.engine_args, "diffusion_kv_cache_skip_layers")
-                        or cfg.engine_args.diffusion_kv_cache_skip_layers is None
-                    ):
-                        cfg.engine_args.diffusion_kv_cache_skip_layers = diffusion_kv_cache_skip_layers
-            except Exception as e:
-                logger.warning("Failed to inject LoRA config for stage: %s", e)
-
-        return config_path, stage_configs
-
-    # ==================== Public API ====================
-
     def add_request(
         self,
         request_id: str,

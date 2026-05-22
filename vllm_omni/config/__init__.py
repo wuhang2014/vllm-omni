@@ -6,17 +6,19 @@ from vllm_omni.config.lora import LoRAConfig
 from vllm_omni.config.model import OmniModelConfig
 from vllm_omni.config.stage_config import (
     DeployConfig,
-    ModelPipeline,
     PipelineConfig,
-    StageConfig,
     StageConfigFactory,
     StageDeployConfig,
     StageExecutionType,
     StagePipelineConfig,
     StageType,
     load_deploy_config,
-    merge_pipeline_deploy,
     register_pipeline,
+)
+from vllm_omni.config.vllm_omni_config import (
+    StageResolvedConfig,
+    VllmOmniConfig,
+    build_vllm_omni_config,
 )
 from vllm_omni.config.yaml_util import (
     create_config,
@@ -28,9 +30,7 @@ from vllm_omni.config.yaml_util import (
 __all__ = [
     "OmniModelConfig",
     "LoRAConfig",
-    "StageConfig",
     "StageConfigFactory",
-    "ModelPipeline",
     "StageType",
     "StageExecutionType",
     "StagePipelineConfig",
@@ -38,8 +38,10 @@ __all__ = [
     "StageDeployConfig",
     "DeployConfig",
     "load_deploy_config",
-    "merge_pipeline_deploy",
     "register_pipeline",
+    "VllmOmniConfig",
+    "StageResolvedConfig",
+    "build_vllm_omni_config",
     "create_config",
     "load_yaml_config",
     "merge_configs",

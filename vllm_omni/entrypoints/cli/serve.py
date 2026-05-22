@@ -6,7 +6,6 @@ diffusion models (e.g., Qwen-Image) through the same CLI interface.
 """
 
 import argparse
-import json
 import os
 import signal
 import threading
@@ -21,7 +20,7 @@ from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-from vllm_omni.engine.arg_utils import nullify_stage_engine_defaults
+from vllm_omni.engine.arg_utils import OmniArgumentParser
 from vllm_omni.entrypoints.cli.logo import log_logo
 from vllm_omni.entrypoints.openai.api_server import omni_run_server
 
@@ -170,7 +169,7 @@ class OmniServeCommand(CLISubcommand):
             return
         validate_parsed_serve_args(args)
 
-    def subparser_init(self, subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+    def subparser_init(self, subparsers: argparse._SubParsersAction) -> OmniArgumentParser:
         serve_parser = subparsers.add_parser(
             self.name,
             description=DESCRIPTION,
@@ -181,492 +180,93 @@ class OmniServeCommand(CLISubcommand):
         serve_parser = make_arg_parser(serve_parser)
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
 
-        # Create OmniConfig argument group for omni-related parameters
-        # This ensures the parameters appear in --help output
-        omni_config_group = serve_parser.add_argument_group(
-            title="OmniConfig", description="Configuration for vLLM-Omni multi-stage and diffusion models."
-        )
+        # Register omni-specific CLI flags (upstream vLLM flags are already
+        # registered by make_arg_parser above). OmniArgumentParser will
+        # inject deploy YAML defaults as action.default before parse.
+        from vllm_omni.engine.arg_utils import OmniEngineArgs
 
-        omni_config_group.add_argument(
-            "--omni",
-            action="store_true",
-            help="Enable vLLM-Omni mode for multi-modal and diffusion models",
-        )
+        OmniEngineArgs.add_cli_args(serve_parser, omni_args_only=True)
 
-        try:
-            omni_config_group.add_argument(
-                "--enable-sleep-mode",
-                action="store_true",
-                default=False,
-                help="Enable GPU memory pool for sleep mode.",
-            )
-        except argparse.ArgumentError:
-            pass
-
-        omni_config_group.add_argument(
-            "--task-type",
-            type=str,
-            default=None,
-            choices=["CustomVoice", "VoiceDesign", "Base"],
-            help="Default task type for TTS models (CustomVoice, VoiceDesign, or Base). "
-            "If not specified, will be inferred from model path.",
-        )
-        # TODO(@lishunyang12): deprecate once all models migrate to --deploy-config
-        omni_config_group.add_argument(
-            "--stage-configs-path",
-            type=str,
-            default=None,
-            help="[Deprecated — will be removed in a future release] Path to a legacy "
-            "stage configs YAML (stage_args format). Prefer --deploy-config for new-format deploy YAMLs.",
-        )
-        omni_config_group.add_argument(
-            "--deploy-config",
-            type=str,
-            default=None,
-            help="Path to a deploy config YAML (new format with stages/engine_args). "
-            "Mutually exclusive with --stage-configs-path.",
-        )
-        omni_config_group.add_argument(
-            "--stage-overrides",
-            type=str,
-            default=None,
-            help="Per-stage JSON overrides. Example: "
-            '\'{"0": {"gpu_memory_utilization": 0.8}, "2": {"enforce_eager": true}}\'',
-        )
-        omni_config_group.add_argument(
-            "--async-chunk",
-            action=argparse.BooleanOptionalAction,
-            default=None,
-            help="Override the deploy YAML's ``async_chunk:`` bool. Unset leaves the YAML value in force.",
-        )
-        omni_config_group.add_argument(
-            "--stage-id",
-            type=int,
-            default=None,
-            help="Select and launch a single stage by stage_id.",
-        )
-        omni_config_group.add_argument(
-            "--replica-id",
-            type=int,
-            default=None,
-            help=(
-                "Deprecated and ignored — replica ids are auto-assigned by the "
-                "master server. Specifying this flag prints a warning and has "
-                "no effect."
-            ),
-        )
-        omni_config_group.add_argument(
-            "--stage-init-timeout",
-            type=int,
-            default=300,
-            help="The timeout for initializing a single stage in seconds (default: 300)",
-        )
-        omni_config_group.add_argument(
-            "--init-timeout",
-            type=int,
-            default=600,
-            help="The timeout for initializing the stages.",
-        )
-        omni_config_group.add_argument(
-            "--shm-threshold-bytes",
-            type=int,
-            default=65536,
-            help="The threshold for the shared memory size.",
-        )
-        omni_config_group.add_argument(
-            "--log-stats",
-            action="store_true",
-            help="Enable logging the stats.",
-        )
-        omni_config_group.add_argument(
-            "--log-file",
-            type=str,
-            default=None,
-            help="The path to the log file.",
-        )
-        omni_config_group.add_argument(
-            "--batch-timeout",
-            type=int,
-            default=10,
-            help="The timeout for the batch.",
-        )
-        omni_config_group.add_argument(
-            "--worker-backend",
-            type=str,
-            default="multi_process",
-            choices=["multi_process", "ray"],
-            help="The backend to use for stage workers.",
-        )
-        omni_config_group.add_argument(
-            "--ray-address",
-            type=str,
-            default=None,
-            help="The address of the Ray cluster to connect to.",
-        )
-        omni_config_group.add_argument(
-            "--omni-master-address",
-            "-oma",
-            type=str,
-            help="Hostname or IP address of the Omni orchestrator (master).",
-        )
-        omni_config_group.add_argument(
-            "--omni-master-port",
-            "-omp",
-            type=int,
-            help="Port of the Omni orchestrator (master).",
-        )
-        omni_config_group.add_argument(
-            "--omni-replica-address",
-            "-ora",
-            type=str,
-            default=None,
-            help=(
-                "Local bind address (this host's IP) that the headless stage "
-                "advertises to the Omni master for its handshake/input/output "
-                "ZMQ sockets. If unset, auto-detected via a UDP-connect "
-                "routing probe against --omni-master-address. Override only "
-                "when the auto-detected IP is wrong (e.g. multi-NIC host "
-                "where the master is reachable on the wrong interface)."
-            ),
-        )
-        omni_config_group.add_argument(
-            "--omni-dp-size-local",
-            type=int,
-            default=1,
-            help=(
-                "Number of stage replicas this runtime launches locally for its "
-                "own --stage-id. Process-local: head and every headless invocation "
-                "read their own copy; values may differ across invocations. "
-                "Requires --stage-id to be set when not equal to 1."
-            ),
-        )
-        omni_config_group.add_argument(
-            "--omni-lb-policy",
-            type=str,
-            default="random",
-            choices=["random", "round-robin", "least-queue-length"],
-            help=(
-                "Per-stage load-balancing policy used by the head's StagePool to "
-                "route requests across UP replicas. Only consulted on the head runtime."
-            ),
-        )
-        omni_config_group.add_argument(
-            "--omni-heartbeat-timeout",
-            type=float,
-            default=30.0,
-            help=(
-                "Seconds before an unreporting replica is marked ERROR in the "
-                "OmniCoordinator. Only consulted on the head runtime."
-            ),
-        )
-
-        # Diffusion model specific arguments
-        omni_config_group.add_argument(
-            "--num-gpus",
-            type=int,
-            default=None,
-            help="Number of GPUs to use for diffusion model inference.",
-        )
-        omni_config_group.add_argument(
-            "--model-class-name",
-            dest="model_class_name",
-            type=str,
-            default=None,
-            help="Override the diffusion pipeline class name (e.g. LTX2ImageToVideoPipeline).",
-        )
-        omni_config_group.add_argument(
-            "--diffusion-load-format",
-            dest="diffusion_load_format",
-            type=str,
-            default=None,
-            choices=["default", "custom_pipeline", "dummy", "diffusers"],
-            help=(
-                "How to load the diffusion pipeline: native/registry (default), "
-                "custom_pipeline, dummy, or diffusers for the HF diffusers adapter."
-            ),
-        )
-        omni_config_group.add_argument(
-            "--diffusers-load-kwargs",
-            dest="diffusers_load_kwargs",
-            type=json.loads,
-            default="{}",
-            help=(
-                "JSON object passed to DiffusionPipeline.from_pretrained()."
-                "It overrides corresponding parameters in the standard vLLM-Omni interface."
-                '(e.g. \'{"use_safetensors": true, "variant": "fp16"}\').'
-            ),
-        )
-        omni_config_group.add_argument(
-            "--diffusers-call-kwargs",
-            dest="diffusers_call_kwargs",
-            type=json.loads,
-            default="{}",
-            help=(
-                "JSON object passed to pipeline.__call__(). "
-                "Useful for model-specific sampling parameters not covered by the vLLM-Omni interface."
-                "During request time, it is overridden by corresponding parameters in the vLLM-Omni interface."
-                '(e.g. \'{"num_inference_steps": 30, "guidance_scale": 7.5}\').'
-            ),
-        )
-        omni_config_group.add_argument(
-            "--usp",
-            "--ulysses-degree",
-            dest="ulysses_degree",
-            type=int,
-            default=None,
-            help="Ulysses Sequence Parallelism degree for diffusion models. "
-            "Equivalent to setting DiffusionParallelConfig.ulysses_degree.",
-        )
-        omni_config_group.add_argument(
-            "--ulysses-mode",
-            type=str,
-            default="strict",
-            choices=["strict", "advanced_uaa"],
-            help="Ulysses sequence-parallel mode for diffusion models. "
-            "'strict' keeps the original divisibility requirements; "
-            "'advanced_uaa' enables the experimental UAA path for uneven sequence/head shapes.",
-        )
-        omni_config_group.add_argument(
-            "--ring",
-            "--ring-degree",
-            dest="ring_degree",
-            type=int,
-            default=None,
-            help="Ring Sequence Parallelism degree for diffusion models. "
-            "Equivalent to setting DiffusionParallelConfig.ring_degree.",
-        )
-        omni_config_group.add_argument(
-            "--quantization-config",
-            type=json.loads,
-            default=None,
-            help=(
-                "JSON string for diffusion quantization_config. "
-                'Example: \'{"method":"gguf","gguf_model":"/path/to/model.gguf"}\'.'
-            ),
-        )
-        omni_config_group.add_argument(
-            "--force-cutlass-fp8",
-            action="store_true",
-            default=None,
-            help=(
-                "Diffusion-only runtime override for ModelOpt FP8 checkpoints: "
-                "force CUTLASS FP8 linear kernels on CUDA SM89+ devices. "
-                "Ignored for BF16, non-ModelOpt FP8, ROCm, and older CUDA GPUs."
-            ),
-        )
-
-        # HSDP (Hybrid Sharded Data Parallel) parameters
-        omni_config_group.add_argument(
-            "--use-hsdp",
-            dest="use_hsdp",
-            action="store_true",
-            help="Enable HSDP (Hybrid Sharded Data Parallel) for diffusion models. "
-            "Shards model weights across GPUs to reduce per-GPU memory usage.",
-        )
-        omni_config_group.add_argument(
-            "--hsdp-shard-size",
-            type=int,
-            default=-1,
-            help="Number of GPUs to shard weights across. -1 = auto (world_size / replicate_size).",
-        )
-        omni_config_group.add_argument(
-            "--hsdp-replicate-size",
-            type=int,
-            default=1,
-            help="Number of replica groups for HSDP. Each group holds a full sharded copy.",
-        )
-
-        # Attention backend configuration
-        omni_config_group.add_argument(
-            "--diffusion-attention-backend",
-            dest="diffusion_attention_backend",
-            type=str,
-            default=None,
-            help="Diffusion attention backend (shorthand). "
-            "Sets the default backend for all diffusion attention roles, e.g. 'FLASH_ATTN'. "
-            "May be combined with --diffusion-attention-config.per_role.* overrides, "
-            "but mutually exclusive with --diffusion-attention-config.default.backend.",
-        )
-        omni_config_group.add_argument(
-            "--diffusion-attention-config",
-            "-dac",
-            dest="diffusion_attention_config",
-            type=json.loads,
-            default=None,
-            help="Diffusion attention config. Accepts JSON or vLLM-style dotted flags. "
-            "Examples: "
-            "--diffusion-attention-config.default.backend FLASH_ATTN, "
-            "--diffusion-attention-config.per_role.self.backend SPARSE_BLOCK, "
-            "--diffusion-attention-config.per_role.cross.backend SAGE_ATTN, "
-            '--diffusion-attention-config \'{"default": {"backend": "FLASH_ATTN"}, '
-            '"per_role": {"cross": {"backend": "SAGE_ATTN"}}}\'.',
-        )
-
-        # Cache optimization parameters
-        omni_config_group.add_argument(
-            "--cache-backend",
-            type=str,
-            default="none",
-            help="Cache backend for diffusion models, options: 'tea_cache', 'cache_dit'",
-        )
-        omni_config_group.add_argument(
-            "--cache-config",
-            type=str,
-            default=None,
-            help="JSON string of cache configuration (e.g., '{\"rel_l1_thresh\": 0.2}').",
-        )
-        omni_config_group.add_argument(
-            "--enable-cache-dit-summary",
-            action="store_true",
-            help="Enable cache-dit summary logging after diffusion forward passes.",
-        )
-        omni_config_group.add_argument(
-            "--step-execution",
-            action="store_true",
-            help="Enable per-step diffusion execution so running requests can be aborted between denoise steps.",
-        )
-
-        # VAE memory optimization parameters
-        omni_config_group.add_argument(
-            "--vae-use-slicing",
-            action="store_true",
-            help="Enable VAE slicing for memory optimization (useful for mitigating OOM issues).",
-        )
-        omni_config_group.add_argument(
-            "--vae-use-tiling",
-            action="store_true",
-            help="Enable VAE tiling for memory optimization (useful for mitigating OOM issues).",
-        )
-
-        # Parallel weight loading (faster diffusion startup)
-        omni_config_group.add_argument(
-            "--disable-multithread-weight-load",
-            action="store_false",
-            dest="enable_multithread_weight_load",
-            default=True,
-            help="Disable multi-threaded safetensors loading (default: enabled with 4 threads).",
-        )
-        omni_config_group.add_argument(
-            "--num-weight-load-threads",
-            type=int,
-            default=4,
-            help="Number of threads for parallel weight loading (default: 4).",
-        )
-
-        # diffusion model offload parameters
-        omni_config_group.add_argument(
-            "--enable-cpu-offload",
-            action="store_true",
-            help="Enable CPU offloading for diffusion models.",
-        )
-        omni_config_group.add_argument(
-            "--enable-layerwise-offload",
-            action="store_true",
-            help="Enable layerwise (blockwise) offloading on DiT modules.",
-        )
-
-        # Video model parameters (e.g., Wan2.2) - engine-level
-        omni_config_group.add_argument(
-            "--boundary-ratio",
-            type=float,
-            default=None,
-            help="Boundary split ratio for low/high DiT in video models (e.g., 0.875 for Wan2.2).",
-        )
-        omni_config_group.add_argument(
-            "--flow-shift",
-            type=float,
-            default=None,
-            help="Scheduler flow_shift for video models (e.g., 5.0 for 720p, 12.0 for 480p).",
-        )
-        # Diffusion KV-cache quantization uses dedicated flags so we do not reuse
-        # vLLM's --kv-cache-dtype (AR cache dtype, default "auto").
-        omni_config_group.add_argument(
-            "--diffusion-kv-cache-dtype",
-            type=str,
-            default=None,
-            help="Diffusion attention KV cache dtype (e.g. fp8). Separate from vLLM --kv-cache-dtype.",
-        )
-        omni_config_group.add_argument(
-            "--diffusion-kv-cache-skip-steps",
-            type=str,
-            default=None,
-            help="Diffusion KV-cache quantization skip-step selector, e.g. '0-9,20,25-30'.",
-        )
-        omni_config_group.add_argument(
-            "--diffusion-kv-cache-skip-layers",
-            type=str,
-            default=None,
-            help="Diffusion KV-cache quantization skip-layer selector, e.g. '0,1,4-8'.",
-        )
-        omni_config_group.add_argument(
-            "--cfg-parallel-size",
-            type=int,
-            default=1,
-            choices=[1, 2],
-            help="Number of devices for CFG parallel computation for diffusion models. "
-            "Equivalent to setting DiffusionParallelConfig.cfg_parallel_size.",
-        )
-        omni_config_group.add_argument(
-            "--vae-patch-parallel-size",
-            type=int,
-            default=1,
-            help="VAE Patch Parallelism degree for diffusion models. "
-            "Distributes VAE decode workload across multiple ranks by splitting the latent spatially. "
-            "Equivalent to setting DiffusionParallelConfig.vae_patch_parallel_size.",
-        )
-
-        # Default sampling parameters
-        omni_config_group.add_argument(
-            "--default-sampling-params",
-            type=str,
-            help="Json str for Default sampling parameters, \n"
-            'Structure: {"<stage_id>": {<sampling_param>: value, ...}, ...}\n'
-            'e.g., \'{"0": {"num_inference_steps":50, "guidance_scale":1}}\'. '
-            "Currently only supports diffusion models.",
-        )
-        # Diffusion model mixed precision
-        omni_config_group.add_argument(
-            "--max-generated-image-size",
-            type=int,
-            help="The max size of generate image (height * width).",
-        )
-
-        # TTS-specific parameters
-        omni_config_group.add_argument(
-            "--tts-max-instructions-length",
-            type=int,
-            default=None,
-            help="Maximum length for TTS voice style instructions (overrides stage config, default: 500).",
-        )
-
-        # Enable diffusion pipeline profiling
-        omni_config_group.add_argument(
-            "--enable-diffusion-pipeline-profiler",
-            action="store_true",
-            help="Enable diffusion pipeline profiler to display stage durations.",
-        )
-        omni_config_group.add_argument(
-            "--enable-ar-profiler",
-            action="store_true",
-            help="Enable AR stage profiler to include AR stage timing in stage_durations.",
-        )
-        # Stash via type(self) so the docs hook (which execs this function in a
-        # sandboxed globals dict via ``DummySelf``) doesn't fail on a NameError.
         type(self)._parser = serve_parser
-
-        nullify_stage_engine_defaults(serve_parser)
         return serve_parser
 
 
-def _create_default_diffusion_stage_cfg(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """Create default diffusion stage configuration.
-
-    Uses AsyncOmniEngine's implementation which doesn't have OmegaConf
-    compatibility issues.
+class _StageCompatWrapper:
+    """Lightweight compatibility wrapper around StageResolvedConfig that
+    provides the attribute interface expected by run_headless's existing
+    code paths (engine_args, runtime, default_sampling_params, etc.).
     """
-    from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
 
-    return AsyncOmniEngine._create_default_diffusion_stage_cfg(vars(args))
+    __slots__ = ("_stage",)
+
+    def __init__(self, stage: Any) -> None:  # StageResolvedConfig
+        self._stage = stage
+
+    @property
+    def stage_id(self) -> int:
+        return self._stage.stage_id
+
+    @property
+    def stage_type(self) -> str:
+        return self._stage.stage_type
+
+    @property
+    def engine_args(self) -> dict[str, Any]:
+        """Provide dict-like engine args for compat with build_engine_args_dict,
+        get_stage_devices_per_replica, inject_omni_kv_config, etc."""
+        stage = self._stage
+        if stage.vllm_config is not None:
+            # LLM stage: VllmConfig has all the fields.
+            return stage.vllm_config
+        if stage.diffusion_config is not None:
+            # Diffusion: provide parallel_config for get_stage_devices_per_replica.
+            return {"parallel_config": stage.diffusion_config.parallel_config}
+        return {}
+
+    @property
+    def runtime(self) -> dict[str, Any]:
+        return self._stage.runtime or {}
+
+    @property
+    def default_sampling_params(self) -> dict[str, Any]:
+        if self._stage.metadata and self._stage.metadata.default_sampling_params:
+            from dataclasses import asdict as _asdict
+
+            return _asdict(self._stage.metadata.default_sampling_params)
+        return {}
+
+    @property
+    def engine_input_source(self) -> list[int]:
+        return self._stage.engine_input_source
+
+    @property
+    def is_prefill_only(self) -> bool:
+        return self._stage.is_prefill_only
+
+    @property
+    def is_decode_only(self) -> bool:
+        return self._stage.is_decode_only
+
+    @property
+    def is_comprehension(self) -> bool:
+        if self._stage.metadata:
+            return self._stage.metadata.is_comprehension
+        return False
+
+    @property
+    def final_output(self) -> bool:
+        if self._stage.metadata:
+            return self._stage.metadata.final_output
+        return False
+
+    @property
+    def final_output_type(self) -> str | None:
+        if self._stage.metadata:
+            return self._stage.metadata.final_output_type
+        return None
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
 
 
 def run_headless(args: argparse.Namespace) -> None:
@@ -686,24 +286,16 @@ def run_headless(args: argparse.Namespace) -> None:
         complete_diffusion_handshake,
         spawn_diffusion_proc,
     )
-    from vllm_omni.distributed.omni_connectors.utils.initialization import resolve_omni_kv_config_for_stage
     from vllm_omni.engine.omni_core_engine_proc_manager import OmniCoreEngineProcManager
     from vllm_omni.engine.stage_engine_startup import register_stage_with_omni_master
     from vllm_omni.engine.stage_init_utils import (
-        build_diffusion_config,
-        build_engine_args_dict,
-        build_vllm_config,
-        extract_stage_metadata,
         get_stage_connector_spec,
         get_stage_devices_per_replica,
-        inject_kv_stage_info,
-        load_omni_transfer_config_for_model,
         prepare_engine_environment,
         setup_stage_devices,
         split_devices_for_replicas,
         terminate_alive_proc,
     )
-    from vllm_omni.entrypoints.utils import inject_omni_kv_config, load_and_resolve_stage_configs
     from vllm_omni.platforms import current_omni_platform
 
     model = args.model
@@ -737,34 +329,29 @@ def run_headless(args: argparse.Namespace) -> None:
     if args.worker_backend != "multi_process":
         raise ValueError("headless mode requires worker_backend=multi_process")
 
-    args_dict = vars(args).copy()
-    args_dict.pop("_cli_explicit_keys", None)
-    # Forward ``--deploy-config`` so the headless reads the same YAML the
-    # head was launched with — otherwise ``load_and_resolve_stage_configs``
-    # falls back to ``vllm_omni/deploy/<model>.yaml`` and the headless's
-    # view of ``stage.runtime.devices`` diverges from the head's, breaking
-    # the per-replica device split.
-    config_path, stage_configs = load_and_resolve_stage_configs(
-        model,
-        args_dict.get("stage_configs_path"),
-        args_dict,
-        deploy_config_path=args_dict.get("deploy_config"),
-    )
+    # Build resolved omni config from CLI args.
+    from vllm_omni.engine.arg_utils import OmniEngineArgs
+
+    engine_args = OmniEngineArgs.from_cli_args(args)
+    omni_config = engine_args.create_omni_config(model)
 
     # Locate the stage config that matches stage_id.
-    stage_cfg = None
-    for cfg in stage_configs:
-        if cfg.stage_id == stage_id:
-            stage_cfg = cfg
+    stage = None
+    for s in omni_config.stages:
+        if s.stage_id == stage_id:
+            stage = s
             break
-    if stage_cfg is None:
+    if stage is None:
         raise ValueError(
-            f"No stage config found for stage_id={stage_id}. Available stage ids: {[c.stage_id for c in stage_configs]}"
+            f"No stage config found for stage_id={stage_id}. "
+            f"Available stage ids: {[s.stage_id for s in omni_config.stages]}"
         )
 
+    # Wrap for compat with existing code paths.
+    stage_cfg = _StageCompatWrapper(stage)
+
     prepare_engine_environment()
-    omni_transfer_config = load_omni_transfer_config_for_model(model, config_path)
-    omni_conn_cfg, omni_from, omni_to = resolve_omni_kv_config_for_stage(omni_transfer_config, stage_id)
+    omni_transfer_config = omni_config.omni_transfer_config
 
     # When ``--omni-dp-size-local > 1``, slice the YAML's ``devices:`` field
     # into per-replica subsets so each subprocess we spawn below sees a
@@ -800,14 +387,7 @@ def run_headless(args: argparse.Namespace) -> None:
     device_control_env = current_omni_platform.device_control_env_var
 
     if stage_cfg.stage_type == "diffusion":
-        metadata = extract_stage_metadata(stage_cfg)
-        if omni_conn_cfg:
-            inject_omni_kv_config(stage_cfg, omni_conn_cfg, omni_from, omni_to)
-        # Headless single-stage launch must still infer cross-stage TP topology
-        # from the loaded deploy config so heterogeneous KV routing keys match
-        # the head process (e.g. from_tp=2, to_tp=1).
-        inject_kv_stage_info(stage_cfg, stage_id, stage_configs)
-        od_config = build_diffusion_config(model, stage_cfg, metadata)
+        od_config = stage.diffusion_config
 
         logger.info(
             "[Headless] Launching %d diffusion replica(s) for stage %d via OmniMasterServer at %s:%d",
@@ -912,42 +492,12 @@ def run_headless(args: argparse.Namespace) -> None:
                 if p.is_alive():
                     terminate_alive_proc(p)
 
-    stage_connector_spec = get_stage_connector_spec(
-        omni_transfer_config=omni_transfer_config,
-        stage_id=stage_id,
-        async_chunk=False,
-    )
+    vllm_config = stage.vllm_config
+    executor_class = stage.executor_class
 
-    # ``runtime_cfg`` is mostly inherited from the parent's
-    # CUDA_VISIBLE_DEVICES; when ``--omni-dp-size-local > 1`` we additionally
-    # bracket each replica's spawn below with setup_stage_devices so they
-    # don't all stack on cuda:0 (see ``per_replica_devices`` above).
-    engine_args_dict = build_engine_args_dict(
-        stage_cfg,
-        model,
-        stage_connector_spec=stage_connector_spec,
-        cli_tokenizer=getattr(args, "tokenizer", None),
-    )
+    if vllm_config is None:
+        raise ValueError(f"Stage {stage_id} is LLM type but has no vllm_config")
 
-    # Inject omni KV connector config so the engine runner can initialize the
-    # correct connector (sender/receiver role, type, addresses, etc.).
-    if omni_conn_cfg:
-        omni_kv = engine_args_dict.get("omni_kv_config") or {}
-        if not isinstance(omni_kv, dict):
-            omni_kv = dict(omni_kv)
-        omni_kv["connector_config"] = omni_conn_cfg
-        omni_kv["omni_from_stage"] = omni_from
-        omni_kv["omni_to_stage"] = omni_to
-        omni_kv.setdefault("stage_id", stage_id)
-        engine_args_dict["omni_kv_config"] = omni_kv
-
-    vllm_config, executor_class = build_vllm_config(
-        stage_cfg,
-        model,
-        stage_connector_spec=stage_connector_spec,
-        engine_args_dict=engine_args_dict,
-        headless=True,
-    )
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
 

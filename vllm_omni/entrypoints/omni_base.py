@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import argparse
 import os
-import sys
 import time
-import warnings
 import weakref
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
@@ -13,6 +10,7 @@ import huggingface_hub
 from vllm.logger import init_logger
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
+from vllm_omni.config import VllmOmniConfig
 from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
 from vllm_omni.engine.messages import (
     EngineQueueMessage,
@@ -28,7 +26,7 @@ from vllm_omni.model_executor.model_loader.weight_utils import download_weights_
 from vllm_omni.outputs import OmniRequestOutput
 
 if TYPE_CHECKING:
-    from vllm_omni.engine.arg_utils import OmniEngineArgs
+    pass
 
 logger = init_logger(__name__)
 
@@ -96,98 +94,159 @@ def omni_snapshot_download(model_id: str) -> str:
 OutputMessageHandleResult = tuple[Literal[True], None, None, None] | tuple[Literal[False], str, int, ClientRequestState]
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge *override* into *base*; override keys win.
+
+    Stage IDs are normalised to strings to avoid duplicate keys when
+    callers provide integer keys alongside YAML's string keys.
+    """
+    result = dict(base)
+    for key, val in override.items():
+        key_str = str(key)
+        if key_str in result and isinstance(result[key_str], dict) and isinstance(val, dict):
+            result[key_str] = _deep_merge(result[key_str], val)
+        else:
+            result[key_str] = val
+    return result
+
+
+def _inject_deploy_defaults(model: str, kwargs: dict[str, Any]) -> None:
+    """Inject model-specific defaults from deploy YAML into *kwargs* in place.
+
+    Pipeline-wide ``DeployConfig`` fields and (for headless) per-stage
+    ``StageDeployConfig`` fields are set via ``kwargs.setdefault`` so explicit
+    user-supplied values always win.  For normal serve, per-stage defaults
+    are deep-merged into ``stage_overrides``.
+
+    Also loads ``PipelineConfig`` from registry and serialises its per-stage
+    topology into ``stage_overrides`` alongside deploy YAML values.
+
+    If *kwargs* contains ``deploy_config`` (from ``--deploy-config``), that
+    file is used directly.  Otherwise ``deploy/<model_type>.yaml`` is
+    resolved from the HuggingFace config.
+
+    This is the **offline-path** counterpart to ``OmniArgumentParser``.
+    """
+    import json as _json
+    from dataclasses import fields as dc_fields
+    from pathlib import Path
+
+    from vllm_omni.config.stage_config import (
+        _DEPLOY_DIR,
+        _PIPELINE_REGISTRY,
+        DeployConfig,
+        StageConfigFactory,
+        StageDeployConfig,
+        load_deploy_config,
+    )
+    from vllm_omni.engine.arg_utils import (
+        _build_unified_stage_overrides,
+    )
+
+    deploy_config_path = kwargs.get("deploy_config")
+    if deploy_config_path:
+        deploy_path = Path(deploy_config_path)
+        if not deploy_path.exists():
+            return
+    else:
+        model_type, _hf_config = StageConfigFactory._auto_detect_model_type(model)
+        if not model_type:
+            return
+        deploy_path = _DEPLOY_DIR / f"{model_type}.yaml"
+        if not deploy_path.exists():
+            return
+
+    try:
+        deploy = load_deploy_config(deploy_path)
+    except Exception:
+        import logging
+
+        _logger = logging.getLogger("vllm_omni.entrypoints.omni_base")
+        _logger.warning("Failed to load deploy config from %s", deploy_path)
+        return
+
+    # Pipeline-wide: fill missing from DeployConfig.
+    for f in dc_fields(DeployConfig):
+        val = getattr(deploy, f.name)
+        if val is not None:
+            kwargs.setdefault(f.name, val)
+
+    # Pipeline topology from registry.
+    pipeline_key = deploy.pipeline or (model_type if "model_type" in dir() else None)
+    # model_type may not be defined if deploy_config_path was used.
+    try:
+        pipeline = _PIPELINE_REGISTRY.get(pipeline_key) if pipeline_key else None
+    except Exception:
+        pipeline = None
+
+    # Per-stage.
+    stage_id = kwargs.get("stage_id")
+    if stage_id is not None:
+        # Headless: fill per-stage kwargs directly.
+        stage_dep = next((s for s in deploy.stages if s.stage_id == stage_id), None)
+        if stage_dep:
+            for f in dc_fields(StageDeployConfig):
+                if f.name == "engine_extras":
+                    continue
+                val = getattr(stage_dep, f.name)
+                if val is not None:
+                    kwargs.setdefault(f.name, val)
+    else:
+        # Normal serve: build unified stage_overrides from pipeline + deploy.
+        overrides = _build_unified_stage_overrides(deploy, pipeline)
+        if overrides:
+            existing = kwargs.get("stage_overrides")
+            if existing:
+                if isinstance(existing, str):
+                    existing = _json.loads(existing)
+                kwargs["stage_overrides"] = _json.dumps(_deep_merge(overrides, existing), sort_keys=True)
+            else:
+                kwargs["stage_overrides"] = _json.dumps(overrides, sort_keys=True)
+
+
 class OmniBase(PDDisaggregationMixin):
     """Shared runtime foundation for AsyncOmni and Omni."""
-
-    @classmethod
-    def from_cli_args(
-        cls,
-        args: argparse.Namespace,
-        *,
-        parser: argparse.ArgumentParser | None = None,
-        **overrides: Any,
-    ) -> OmniBase:
-        """Deprecated argparse builder.
-
-        Build from argparse. If ``parser`` is passed and not yet nullified,
-        un-typed engine fields are reset to ``None``. New callers should
-        nullify deploy-overriding parser defaults with
-        ``nullify_stage_engine_defaults(parser)`` and construct Omni/AsyncOmni
-        directly.
-        """
-        warnings.warn(
-            "`from_cli_args()` is deprecated. Nullify deploy-overriding parser defaults "
-            "with `nullify_stage_engine_defaults(parser)` and construct Omni/AsyncOmni "
-            "directly from `vars(args)`.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        kwargs: dict[str, Any] = {k: v for k, v in vars(args).items() if not k.startswith("_")}
-
-        if parser is not None and not getattr(parser, "_omni_nullified", False):
-            from vllm_omni.config.stage_config import deploy_override_field_names
-            from vllm_omni.entrypoints.utils import detect_explicit_cli_keys
-
-            explicit = detect_explicit_cli_keys(sys.argv[1:], parser) or set()
-            override_dests = deploy_override_field_names()
-            for key in list(kwargs):
-                if key in override_dests and key not in explicit:
-                    kwargs[key] = None
-
-        kwargs.update(overrides)
-        return cls(**kwargs)
 
     def __init__(
         self,
         model: str,
+        *,
+        omni_config: VllmOmniConfig | None = None,
         **kwargs: Any,
     ) -> None:
-        engine_args: OmniEngineArgs | None = kwargs.pop("engine_args", None)
-
-        stage_init_timeout = kwargs.pop("stage_init_timeout", 300)
-        init_timeout = kwargs.pop("init_timeout", 600)
-        log_stats = kwargs.pop("log_stats", False)
-        self._enable_ar_profiler = kwargs.pop("enable_ar_profiler", False)
-        # NOTE: read-only lookup — must NOT pop. Popping here drops the key
-        # before it reaches ``StageConfigFactory._create_from_registry``, so
-        # ``--no-async-chunk`` (``async_chunk=False``) silently fails to
-        # override the deploy YAML's ``async_chunk: true`` default.
-        async_chunk = kwargs.get("async_chunk")
-        output_modalities = kwargs.pop("output_modalities", None)
-        diffusion_batch_size: int = kwargs.pop("diffusion_batch_size", 1)
-
         if "log_requests" in kwargs:
             raise TypeError("`log_requests` has been removed in Omni/AsyncOmni. Use `log_stats`.")
+
+        output_modalities = kwargs.pop("output_modalities", None)
+        self._enable_ar_profiler = kwargs.pop("enable_ar_profiler", False)
+        self.tts_batch_max_items: int = kwargs.pop("tts_batch_max_items", 32)
+
+        # Build or receive the unified config.
+        if omni_config is not None:
+            pass  # already resolved
+        else:
+            _inject_deploy_defaults(model, kwargs)
+            from vllm_omni.engine.arg_utils import OmniEngineArgs as _EA  # noqa: N814
+
+            engine_args = _EA.from_kwargs(model, **kwargs)
+            omni_config = engine_args.create_omni_config(model)
+
         model = omni_snapshot_download(model)
         self.__dict__["_name"] = self.__class__.__name__
         self.model = model
-        self.log_stats = log_stats
-        # Provisional value (mirrors the CLI/caller kwarg); the engine resolves
-        # pipeline + deploy YAML + CLI precedence below and the final value is
-        # re-assigned from ``self.engine.async_chunk`` after init.
-        self.async_chunk = bool(async_chunk) if async_chunk is not None else False
+        self.omni_config = omni_config
+        self.async_chunk = omni_config.async_chunk
+        self.log_stats = omni_config.log_stats
         self.output_modalities = output_modalities or []
-        self.tts_batch_max_items: int = kwargs.pop("tts_batch_max_items", 32)
 
         logger.info("[%s] Initializing with model %s", self.__class__.__name__, model)
         st = time.time()
-        self.engine = AsyncOmniEngine(
-            model=model,
-            engine_args=engine_args,
-            init_timeout=init_timeout,
-            stage_init_timeout=stage_init_timeout,
-            diffusion_batch_size=diffusion_batch_size,
-            **kwargs,
-        )
+        self.engine = AsyncOmniEngine(model=model, omni_config=omni_config)
         self._shutdown_called = False
         self._weak_finalizer = weakref.finalize(self, _weak_shutdown_engine, self.engine)
         et = time.time()
         logger.info("[%s] AsyncOmniEngine initialized in %.2f seconds", self.__class__.__name__, et - st)
-        # Authoritative: ``AsyncOmniEngine`` resolves (pipeline + deploy YAML +
-        # CLI overrides) through ``StageConfigFactory`` and stores the final
-        # value on ``engine.async_chunk``; mirror it here so ``--no-async-chunk``
-        # (explicit ``False``) is not fallen-back-through by ``or``.
-        self.async_chunk = bool(getattr(self.engine, "async_chunk", False))
+        self.async_chunk = self.omni_config.async_chunk
 
         self.request_states: dict[str, ClientRequestState] = {}
 
