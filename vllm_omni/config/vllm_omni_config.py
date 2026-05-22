@@ -1,13 +1,15 @@
 """
 Unified configuration for vLLM-Omni.
 
-Two frozen dataclasses plus a single factory function that replace
+Two frozen dataclasses plus helper functions consumed by
+:meth:`~vllm_omni.engine.arg_utils.OmniEngineArgs.create_omni_config`,
+the single factory that replaces
 all scattered config building, kwargs partitioning, OmegaConf
 roundtrips, and heuristic default-resolution.
 
 - :class:`StageResolvedConfig` — pre-built immutable per-stage config
 - :class:`VllmOmniConfig` — top-level frozen runtime configuration
-- :func:`build_vllm_omni_config` — the single factory
+- :meth:`~vllm_omni.engine.arg_utils.OmniEngineArgs.create_omni_config` — the single factory
 
 Built once at the entrypoint and consumed by
 :class:`~vllm_omni.engine.async_omni_engine.AsyncOmniEngine`,
@@ -46,7 +48,7 @@ class StageResolvedConfig:
 
     All construction (``VllmConfig``, ``OmniDiffusionConfig``,
     :class:`StageMetadata`, connector resolution, prompt expansion)
-    happens inside :func:`build_vllm_omni_config`.  Downstream code
+    happens inside :meth:`OmniEngineArgs.create_omni_config`.  Downstream code
     reads attributes — never rebuilds.
     """
 
@@ -136,7 +138,7 @@ class StageResolvedConfig:
 class VllmOmniConfig:
     """Fully-resolved, immutable runtime configuration.
 
-    Built once by :func:`build_vllm_omni_config`.  Consumed by
+    Built once by :meth:`OmniEngineArgs.create_omni_config`.  Consumed by
     :class:`~vllm_omni.engine.async_omni_engine.AsyncOmniEngine`,
     :class:`~vllm_omni.engine.orchestrator.Orchestrator`, and
     :class:`~vllm_omni.entrypoints.omni_base.OmniBase`.
@@ -502,78 +504,3 @@ def _detect_pd_config(
 # ---------------------------------------------------------------------------
 
 
-def build_vllm_omni_config(
-    model: str,
-    *,
-    engine_args: OmniEngineArgs,
-    stage_init_timeout: int = 300,
-    init_timeout: int = 600,
-    shm_threshold_bytes: int = 65536,
-    batch_timeout: int = 10,
-    worker_backend: str = "multi_process",
-    log_stats: bool = False,
-) -> VllmOmniConfig:
-    """Build a resolved ``VllmOmniConfig`` from fully-resolved engine args.
-
-    *engine_args* is already fully resolved — ``OmniArgumentParser``
-    injected YAML defaults before parse (online) or
-    ``_inject_deploy_defaults`` set ``kwargs.setdefault`` (offline).
-    No further merge is needed.
-
-    This function:
-    1. Parses ``engine_args.stage_overrides`` → per-stage topology + defaults.
-    2. For each stage: builds ``VllmConfig`` / ``OmniDiffusionConfig``.
-    3. Extracts :class:`StageMetadata`, wires KV connectors.
-    4. Loads omni transfer config, detects PD disaggregation.
-    5. Assembles and returns the immutable ``VllmOmniConfig``.
-    """
-    # Defer imports to avoid circular dependency.
-    from vllm_omni.engine.stage_init_utils import load_omni_transfer_config_for_model
-
-    # 1. Parse stage_overrides (already merged by OmniArgumentParser / _inject_deploy_defaults).
-    stage_overrides = _parse_stage_overrides(getattr(engine_args, "stage_overrides", None))
-
-    # 2. Handle no-pipeline case → single diffusion stage.
-    if not stage_overrides:
-        return _build_default_diffusion_config(
-            model=model,
-            engine_args=engine_args,
-        )
-
-    # 3. Resolve async_chunk: CLI > deploy YAML > default.
-    async_chunk = bool(getattr(engine_args, "async_chunk", False))
-
-    # 4. Load omni transfer config.
-    omni_transfer_config = load_omni_transfer_config_for_model(
-        model,
-        getattr(engine_args, "deploy_config", None),
-    )
-
-    # 5. Build per-stage resolved configs.
-    resolved_stages, top_level_diffusion_config, prompt_expand_func = _resolve_stages(
-        model=model,
-        stage_overrides=stage_overrides,
-        engine_args=engine_args,
-        async_chunk=async_chunk,
-        omni_transfer_config=omni_transfer_config,
-    )
-
-    # 6. Detect PD disaggregation.
-    pd_config = _detect_pd_config(resolved_stages)
-
-    # 7. Assemble and return.
-    return VllmOmniConfig(
-        model=model,
-        stages=tuple(resolved_stages),
-        diffusion_config=top_level_diffusion_config,
-        async_chunk=async_chunk,
-        stage_init_timeout=stage_init_timeout,
-        init_timeout=init_timeout,
-        shm_threshold_bytes=shm_threshold_bytes,
-        batch_timeout=batch_timeout,
-        worker_backend=worker_backend,
-        log_stats=log_stats,
-        pd_config=pd_config,
-        omni_transfer_config=omni_transfer_config,
-        prompt_expand_func=prompt_expand_func,
-    )

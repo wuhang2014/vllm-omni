@@ -17,7 +17,6 @@ from vllm_omni.config.stage_config import (
 from vllm_omni.config.vllm_omni_config import (
     StageResolvedConfig,
     VllmOmniConfig,
-    build_vllm_omni_config,
 )
 from vllm_omni.config.yaml_util import (
     create_config,
@@ -39,7 +38,6 @@ __all__ = [
     "register_pipeline",
     "VllmOmniConfig",
     "StageResolvedConfig",
-    "build_vllm_omni_config",
     "create_config",
     "load_yaml_config",
     "merge_configs",

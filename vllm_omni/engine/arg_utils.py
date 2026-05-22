@@ -17,17 +17,10 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm_omni.config import VllmOmniConfig
 from vllm_omni.config.stage_config import (
     _PIPELINE_WIDE_ENGINE_FIELDS,
-)
-from vllm_omni.config.stage_config import (
     StageDeployConfig as _StageDeployConfig,
-)
-from vllm_omni.config.stage_config import (
     StageExecutionType as _StageExecutionType,
-)
-from vllm_omni.config.stage_config import (
     StagePipelineConfig as _StagePipelineConfig,
 )
-from vllm_omni.config.vllm_omni_config import build_vllm_omni_config
 from vllm_omni.engine.output_modality import OutputModality
 from vllm_omni.platforms import current_omni_platform
 from vllm_omni.plugins import load_omni_general_plugins
@@ -458,17 +451,61 @@ class OmniEngineArgs(EngineArgs):
     ) -> VllmOmniConfig:
         """Build a resolved ``VllmOmniConfig`` from this engine args instance.
 
-        Delegates to :func:`build_vllm_omni_config`.
+        All values are read from ``self`` — no further merge needed.
+        ``OmniArgumentParser`` (online) or ``_inject_deploy_defaults`` (offline)
+        already resolved all defaults before this method is called.
         """
-        return build_vllm_omni_config(
+        from vllm_omni.config.vllm_omni_config import (
+            _build_default_diffusion_config,
+            _detect_pd_config,
+            _parse_stage_overrides,
+            _resolve_stages,
+        )
+        from vllm_omni.engine.stage_init_utils import load_omni_transfer_config_for_model
+
+        # 1. Parse stage_overrides (already merged by OmniArgumentParser / _inject_deploy_defaults).
+        stage_overrides = _parse_stage_overrides(self.stage_overrides)
+
+        # 2. Handle no-pipeline case → single diffusion stage.
+        if not stage_overrides:
+            return _build_default_diffusion_config(
+                model=model,
+                engine_args=self,
+            )
+
+        # 3. Resolve async_chunk: CLI > deploy YAML > default.
+        async_chunk = bool(self.async_chunk)
+
+        # 4. Load omni transfer config.
+        omni_transfer_config = load_omni_transfer_config_for_model(model, self.deploy_config)
+
+        # 5. Build per-stage resolved configs.
+        resolved_stages, top_level_diffusion_config, prompt_expand_func = _resolve_stages(
             model=model,
+            stage_overrides=stage_overrides,
             engine_args=self,
+            async_chunk=async_chunk,
+            omni_transfer_config=omni_transfer_config,
+        )
+
+        # 6. Detect PD disaggregation.
+        pd_config = _detect_pd_config(resolved_stages)
+
+        # 7. Assemble and return.
+        return VllmOmniConfig(
+            model=model,
+            stages=tuple(resolved_stages),
+            diffusion_config=top_level_diffusion_config,
+            async_chunk=async_chunk,
             stage_init_timeout=self.stage_init_timeout,
             init_timeout=self.init_timeout,
             shm_threshold_bytes=self.shm_threshold_bytes,
             batch_timeout=self.batch_timeout,
             worker_backend=self.worker_backend,
             log_stats=self.log_stats,
+            pd_config=pd_config,
+            omni_transfer_config=omni_transfer_config,
+            prompt_expand_func=prompt_expand_func,
         )
 
     def _ensure_omni_models_registered(self):
