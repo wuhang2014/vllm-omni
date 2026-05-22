@@ -79,8 +79,6 @@ from vllm_omni.engine.stage_init_utils import (
     LogicalStageInitPlan,
     ReplicaInitPlan,
     build_diffusion_config,
-    build_engine_args_dict,
-    build_vllm_config,
     capture_stage_factory_contexts,
     compute_replica_layout,
     get_stage_connector_spec,
@@ -490,34 +488,8 @@ class AsyncOmniEngine:
             stage_vllm_config = None
             executor_class = None
             if stage_cfg.stage_type != "diffusion":
-                engine_args_dict = build_engine_args_dict(
-                    stage_cfg,
-                    self.model,
-                    stage_connector_spec=stage_connector_spec,
-                    cli_tokenizer=getattr(self, "tokenizer", None),
-                )
-                omni_conn_cfg, omni_from, omni_to = omni_kv_connector
-                if omni_conn_cfg:
-                    omni_kv = engine_args_dict.get("omni_kv_config") or {}
-                    if not isinstance(omni_kv, dict):
-                        omni_kv = dict(omni_kv)
-                    omni_kv["connector_config"] = omni_conn_cfg
-                    omni_kv["omni_from_stage"] = omni_from
-                    omni_kv["omni_to_stage"] = omni_to
-                    omni_kv.setdefault("stage_id", configured_stage_id)
-                    engine_args_dict["omni_kv_config"] = omni_kv
-                if self.stage_configs:
-                    _inject_inferred_kv_tp_topology(
-                        engine_args_dict.get("omni_kv_config"),
-                        configured_stage_id,
-                        self.stage_configs,
-                    )
-                stage_vllm_config, executor_class = build_vllm_config(
-                    stage_cfg,
-                    self.model,
-                    stage_connector_spec=stage_connector_spec,
-                    engine_args_dict=engine_args_dict,
-                )
+                stage_vllm_config = stage_cfg.vllm_config
+                executor_class = stage_cfg.executor_class
 
             for replica_id in range(num_replicas):
                 replica_cfg = copy.deepcopy(stage_cfg) if replica_id > 0 else stage_cfg
@@ -809,15 +781,9 @@ class AsyncOmniEngine:
                             executor_class = plan.executor_class
                             assert vllm_config is not None
                             assert executor_class is not None
-                            engine_args_dict = build_engine_args_dict(
-                                stage_cfg,
-                                self.model,
-                                stage_connector_spec=plan.stage_connector_spec,
-                                cli_tokenizer=getattr(self, "tokenizer", None),
-                            )
                             lock_fds = acquire_device_locks(
                                 plan.configured_stage_id,
-                                engine_args_dict,
+                                vllm_config,
                                 stage_init_timeout,
                             )
                             if self.single_stage_mode and self._omni_master_server is not None:

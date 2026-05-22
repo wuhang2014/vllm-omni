@@ -615,68 +615,6 @@ def build_vllm_config_from_engine_args(
     return vllm_config, executor_class
 
 
-def build_vllm_config(
-    stage_config: Any,
-    model: str,
-    stage_connector_spec: dict[str, Any] | None = None,
-    engine_args_dict: dict[str, Any] | None = None,
-    headless: bool = False,
-) -> tuple[Any, type]:
-    """Build engine args, then create VllmConfig and executor_class.
-
-    Returns:
-        (vllm_config, executor_class)
-    """
-    if engine_args_dict is None:
-        engine_args_dict = build_engine_args_dict(
-            stage_config,
-            model,
-            stage_connector_spec=stage_connector_spec,
-        )
-
-    filtered_engine_args_dict = filter_dataclass_kwargs(OmniEngineArgs, engine_args_dict)
-
-    # _to_dict serializes dataclass fields (e.g. StructuredOutputsConfig) into
-    # plain dicts.  When OmniEngineArgs is instantiated with the dict, these
-    # fields remain dicts instead of being reconstructed as dataclass objects.
-    # Later, EngineArgs.create_engine_config() does
-    #   self.structured_outputs_config.reasoning_parser = ...
-    # which fails on a plain dict.  Reconstruct the dataclass here.
-    soc = filtered_engine_args_dict.get("structured_outputs_config")
-    if isinstance(soc, dict):
-        from vllm.config import StructuredOutputsConfig
-
-        filtered_engine_args_dict["structured_outputs_config"] = StructuredOutputsConfig(**soc)
-
-    omni_engine_args = OmniEngineArgs(**filtered_engine_args_dict)
-
-    # Multi-stage pipelines (qwen3_tts code2wav, etc.) set max_model_len
-    # larger than HF max_position_embeddings by design. vLLM's validator
-    # rejects that without the env flag.
-    if filtered_engine_args_dict.get("max_model_len") is not None and not os.environ.get(
-        "VLLM_ALLOW_LONG_MAX_MODEL_LEN"
-    ):
-        os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-        logger.debug(
-            "Auto-set VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 for stage %s (max_model_len=%s).",
-            stage_config.stage_id,
-            filtered_engine_args_dict["max_model_len"],
-        )
-
-    vllm_config = omni_engine_args.create_engine_config(
-        usage_context=UsageContext.LLM_CLASS,
-        headless=headless,
-    )
-    executor_class = Executor.get_class(vllm_config)
-
-    # Upgrade vanilla INCConfig to OmniINCConfig for multi-stage models.
-    upgraded = OmniINCConfig.maybe_upgrade(vllm_config.quant_config)
-    if upgraded is not vllm_config.quant_config:
-        vllm_config = replace(vllm_config, quant_config=upgraded)
-
-    return vllm_config, executor_class
-
-
 def build_llm_stage_output_processor(plan: LogicalStageInitPlan, stage_vllm_config: Any) -> Any | None:
     """Build one output processor per logical LLM stage."""
 
@@ -708,7 +646,7 @@ def build_stage0_input_processor(stage_vllm_config: Any) -> InputProcessor:
 
 def acquire_device_locks(
     stage_id: int,
-    engine_args_dict: dict[str, Any],
+    engine_args_dict_or_config: dict[str, Any] | Any,
     stage_init_timeout: int,
 ) -> list[int]:
     """Acquire exclusive file locks on devices needed by this stage.
@@ -716,21 +654,37 @@ def acquire_device_locks(
     Returns list of lock file descriptors that must be released after init.
     """
     lock_fds: list[int] = []
+    d = engine_args_dict_or_config
     try:
-        # Get parallel sizes
-        if "parallel_config" in engine_args_dict:
-            pc = engine_args_dict["parallel_config"]
+        # Accept VllmConfig (has parallel_config) or plain dict.
+        if hasattr(d, "parallel_config"):
+            pc = d.parallel_config
+            tensor_parallel_size = getattr(pc, "tensor_parallel_size", 1)
+            pipeline_parallel_size = getattr(pc, "pipeline_parallel_size", 1)
+            data_parallel_size = getattr(pc, "data_parallel_size", 1)
+            prefill_context_parallel_size = getattr(pc, "prefill_context_parallel_size", 1)
+            sequence_parallel_size = getattr(pc, "sequence_parallel_size", 1)
+            cfg_parallel_size = getattr(pc, "cfg_parallel_size", 1)
+        elif isinstance(d, dict) and "parallel_config" in d:
+            pc = d["parallel_config"]
             tensor_parallel_size = pc.get("tensor_parallel_size", 1)
             pipeline_parallel_size = pc.get("pipeline_parallel_size", 1)
             data_parallel_size = pc.get("data_parallel_size", 1)
             prefill_context_parallel_size = pc.get("prefill_context_parallel_size", 1)
             sequence_parallel_size = pc.get("sequence_parallel_size", 1)
             cfg_parallel_size = pc.get("cfg_parallel_size", 1)
+        elif isinstance(d, dict):
+            tensor_parallel_size = d.get("tensor_parallel_size", 1)
+            pipeline_parallel_size = d.get("pipeline_parallel_size", 1)
+            data_parallel_size = d.get("data_parallel_size", 1)
+            prefill_context_parallel_size = d.get("prefill_context_parallel_size", 1)
+            sequence_parallel_size = 1
+            cfg_parallel_size = 1
         else:
-            tensor_parallel_size = engine_args_dict.get("tensor_parallel_size", 1)
-            pipeline_parallel_size = engine_args_dict.get("pipeline_parallel_size", 1)
-            data_parallel_size = engine_args_dict.get("data_parallel_size", 1)
-            prefill_context_parallel_size = engine_args_dict.get("prefill_context_parallel_size", 1)
+            tensor_parallel_size = 1
+            pipeline_parallel_size = 1
+            data_parallel_size = 1
+            prefill_context_parallel_size = 1
             sequence_parallel_size = 1
             cfg_parallel_size = 1
 
