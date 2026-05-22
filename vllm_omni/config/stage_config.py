@@ -617,89 +617,75 @@ _PIPELINE_WIDE_ENGINE_FIELDS: tuple[str, ...] = (
 )
 
 
-class StageConfigFactory:
-    """Factory that loads pipeline YAML and merges CLI overrides.
+def _auto_detect_model_type(model: str, trust_remote_code: bool = True) -> tuple[str | None, Any]:
+    """Auto-detect model_type from model directory.
 
-    Handles both single-stage and multi-stage models.
+    Args:
+        model: Model name or path.
+        trust_remote_code: Whether to trust remote code for HF config loading.
 
-    Pipelines are declared in ``vllm_omni/config/pipeline_registry.py`` and
-    loaded lazily via ``_PIPELINE_REGISTRY``; no hardcoded model-type →
-    directory mapping is maintained here. Models with generic HF
-    ``model_type`` collisions (e.g. MiMo Audio reports ``qwen2``) should
-    declare ``hf_architectures=(...)`` on their ``PipelineConfig`` so the
-    factory can disambiguate via ``hf_config.architectures``.
+    Returns:
+        Tuple of (model_type, hf_config). Both may be None on failure.
     """
+    try:
+        from vllm.transformers_utils.config import get_config
 
-    @classmethod
-    def _auto_detect_model_type(cls, model: str, trust_remote_code: bool = True) -> tuple[str | None, Any]:
-        """Auto-detect model_type from model directory.
+        hf_config = get_config(model, trust_remote_code=trust_remote_code)
+        return hf_config.model_type, hf_config
+    except Exception as e:
+        logger.debug("`get_config` failed for %s; Falling back to raw config.json path", e)
 
-        Args:
-            model: Model name or path.
-            trust_remote_code: Whether to trust remote code for HF config loading.
+    # Fallback: read config.json directly for custom model types that
+    # are not registered with transformers (e.g. qwen3_tts).
+    try:
+        from vllm.transformers_utils.config import get_hf_file_to_dict
 
-        Returns:
-            Tuple of (model_type, hf_config). Both may be None on failure.
-        """
-        try:
-            from vllm.transformers_utils.config import get_config
+        config_dict = get_hf_file_to_dict("config.json", model, revision=None)
+        if config_dict:
+            if "model_type" in config_dict:
+                return config_dict["model_type"], None
+            # VoxCPM2-style configs use singular ``architecture`` rather
+            # than HF's standard ``model_type`` / ``architectures``. Accept
+            # it as a fallback so the pipeline registry can still match.
+            if "architecture" in config_dict and isinstance(config_dict["architecture"], str):
+                return config_dict["architecture"], None
+    except Exception as e:
+        logger.debug("Failed to auto-detect model type for %s: %s", model, e)
 
-            hf_config = get_config(model, trust_remote_code=trust_remote_code)
-            return hf_config.model_type, hf_config
-        except Exception as e:
-            logger.debug("`get_config` failed for %s; Falling back to raw config.json path", e)
+    # Fallback for diffusers-style models: check model_index.json.
+    # Some models (e.g. GLM-Image) have no root config.json but ship a
+    # model_index.json with _class_name that maps to a pipeline key via
+    # PipelineConfig.diffusers_class_name.
+    try:
+        from vllm.transformers_utils.config import get_hf_file_to_dict
 
-        # Fallback: read config.json directly for custom model types that
-        # are not registered with transformers (e.g. qwen3_tts).
-        try:
-            from vllm.transformers_utils.config import get_hf_file_to_dict
+        model_index = get_hf_file_to_dict("model_index.json", model, revision=None)
+        if model_index and "_class_name" in model_index:
+            class_name = model_index["_class_name"]
+            for pipeline_cfg in _PIPELINE_REGISTRY.values():
+                if pipeline_cfg.diffusers_class_name == class_name:
+                    logger.info(
+                        "Detected pipeline %r from model_index.json (_class_name=%r)",
+                        pipeline_cfg.model_type,
+                        class_name,
+                    )
+                    return pipeline_cfg.model_type, None
+    except Exception as e:
+        logger.debug("Failed to detect model type for diffusers-style models: %s", e)
 
-            config_dict = get_hf_file_to_dict("config.json", model, revision=None)
-            if config_dict:
-                if "model_type" in config_dict:
-                    return config_dict["model_type"], None
-                # VoxCPM2-style configs use singular ``architecture`` rather
-                # than HF's standard ``model_type`` / ``architectures``. Accept
-                # it as a fallback so the pipeline registry can still match.
-                if "architecture" in config_dict and isinstance(config_dict["architecture"], str):
-                    return config_dict["architecture"], None
-        except Exception as e:
-            logger.debug("Failed to auto-detect model type for %s: %s", model, e)
+    # Final fallback: some models (e.g. CosyVoice3) ship an empty
+    # config.json and rely on naming conventions. Match the model path
+    # basename against registered pipeline keys — longest match wins
+    # so "cosyvoice3" (length 10) beats "cosyvoice" (length 9).
+    model_lower = model.lower().replace("-", "").replace("_", "")
+    best: str | None = None
+    best_len = 0
+    for registered_key in _PIPELINE_REGISTRY.keys():
+        candidate = registered_key.lower().replace("-", "").replace("_", "")
+        if candidate and candidate in model_lower and len(candidate) > best_len:
+            best = registered_key
+            best_len = len(candidate)
+    if best is not None:
+        return best, None
 
-        # Fallback for diffusers-style models: check model_index.json.
-        # Some models (e.g. GLM-Image) have no root config.json but ship a
-        # model_index.json with _class_name that maps to a pipeline key via
-        # PipelineConfig.diffusers_class_name.
-        try:
-            from vllm.transformers_utils.config import get_hf_file_to_dict
-
-            model_index = get_hf_file_to_dict("model_index.json", model, revision=None)
-            if model_index and "_class_name" in model_index:
-                class_name = model_index["_class_name"]
-                for pipeline_cfg in _PIPELINE_REGISTRY.values():
-                    if pipeline_cfg.diffusers_class_name == class_name:
-                        logger.info(
-                            "Detected pipeline %r from model_index.json (_class_name=%r)",
-                            pipeline_cfg.model_type,
-                            class_name,
-                        )
-                        return pipeline_cfg.model_type, None
-        except Exception as e:
-            logger.debug("Failed to detect model type for diffusers-style models: %s", e)
-
-        # Final fallback: some models (e.g. CosyVoice3) ship an empty
-        # config.json and rely on naming conventions. Match the model path
-        # basename against registered pipeline keys — longest match wins
-        # so "cosyvoice3" (length 10) beats "cosyvoice" (length 9).
-        model_lower = model.lower().replace("-", "").replace("_", "")
-        best: str | None = None
-        best_len = 0
-        for registered_key in _PIPELINE_REGISTRY.keys():
-            candidate = registered_key.lower().replace("-", "").replace("_", "")
-            if candidate and candidate in model_lower and len(candidate) > best_len:
-                best = registered_key
-                best_len = len(candidate)
-        if best is not None:
-            return best, None
-
-        return None, None
+    return None, None

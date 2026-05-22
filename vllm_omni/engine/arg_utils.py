@@ -763,8 +763,8 @@ class OmniArgumentParser(FlexibleArgumentParser):
         from vllm_omni.config.stage_config import (
             _DEPLOY_DIR,
             _PIPELINE_REGISTRY,
+            _auto_detect_model_type,
             DeployConfig,
-            StageConfigFactory,
             StageDeployConfig,
             load_deploy_config,
         )
@@ -775,7 +775,7 @@ class OmniArgumentParser(FlexibleArgumentParser):
             if not deploy_path.exists():
                 return
         else:
-            model_type, _hf_config = StageConfigFactory._auto_detect_model_type(model)
+            model_type, _hf_config = _auto_detect_model_type(model)
             if not model_type:
                 return
             deploy_path = _DEPLOY_DIR / f"{model_type}.yaml"

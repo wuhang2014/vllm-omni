@@ -7,7 +7,6 @@ from vllm_omni.config.model import OmniModelConfig
 from vllm_omni.config.stage_config import (
     DeployConfig,
     PipelineConfig,
-    StageConfigFactory,
     StageDeployConfig,
     StageExecutionType,
     StagePipelineConfig,
@@ -30,7 +29,6 @@ from vllm_omni.config.yaml_util import (
 __all__ = [
     "OmniModelConfig",
     "LoRAConfig",
-    "StageConfigFactory",
     "StageType",
     "StageExecutionType",
     "StagePipelineConfig",
