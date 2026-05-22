@@ -13,9 +13,10 @@ import importlib
 import multiprocessing as mp
 import os
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -28,11 +29,10 @@ from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.engine.arg_utils import OmniEngineArgs
 from vllm_omni.engine.output_processor import MultimodalOutputProcessor
 from vllm_omni.entrypoints.stage_utils import _to_dict, set_stage_devices
-from vllm_omni.entrypoints.utils import filter_dataclass_kwargs, resolve_model_config_path
-from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniSamplingParams
-from vllm_omni.inputs.preprocess import OmniInputPreprocessor
 from vllm_omni.platforms import current_omni_platform
-from vllm_omni.quantization.inc_config import OmniINCConfig
+
+if TYPE_CHECKING:
+    from vllm_omni.config.vllm_omni_config import StageResolvedConfig
 
 logger = init_logger(__name__)
 
@@ -1038,3 +1038,332 @@ def initialize_diffusion_stage(
 
     od_config = build_diffusion_config(model, stage_cfg, metadata)
     return create_diffusion_client(model, od_config, metadata, stage_init_timeout, batch_size, use_inline)
+
+
+# ---------------------------------------------------------------------------
+# Headless helpers — shared between serve.py:run_headless and future head paths
+# ---------------------------------------------------------------------------
+
+
+def _get_devices_per_replica_from_resolved(stage: StageResolvedConfig) -> int:
+    """Return the number of devices consumed by one replica of *stage*.
+
+    Replaces ``get_stage_devices_per_replica()`` for the ``StageResolvedConfig``
+    case — reads ``tensor_parallel_size`` from ``VllmConfig`` (LLM) or
+    ``world_size`` from ``OmniDiffusionConfig.parallel_config`` (diffusion).
+    """
+    if stage.stage_type != "diffusion":
+        if stage.vllm_config is not None:
+            return stage.vllm_config.parallel_config.tensor_parallel_size
+        return 1
+    if stage.diffusion_config is not None:
+        return max(1, stage.diffusion_config.parallel_config.world_size)
+    return 1
+
+
+def compute_per_replica_devices(
+    stage: StageResolvedConfig,
+    num_replicas: int,
+    stage_id: int,
+) -> list[str | None]:
+    """Compute per-replica device strings for a stage.
+
+    Reads ``runtime.devices`` from *stage*.  Returns a list of device strings
+    (or ``None`` per replica when no split is needed).
+    """
+    runtime = stage.runtime or {}
+    devices_str: str | None = (
+        runtime.get("devices") if isinstance(runtime, dict) else None
+    )
+    devices_per_replica = _get_devices_per_replica_from_resolved(stage)
+    if devices_str:
+        return split_devices_for_replicas(
+            devices_str, num_replicas, devices_per_replica, stage_id
+        )
+    return [None] * num_replicas
+
+
+@contextmanager
+def replica_device_context(stage_id: int, device_str: str | None) -> Iterator[None]:
+    """Context manager that sets CUDA_VISIBLE_DEVICES per replica and restores after.
+
+    Usage::
+
+        with replica_device_context(stage_id, per_replica_devices[rep_idx]):
+            # spawn / launch replica
+    """
+    device_control_env = current_omni_platform.device_control_env_var
+    previous = os.environ.get(device_control_env)
+    try:
+        if device_str is not None:
+            setup_stage_devices(stage_id, {"devices": device_str})
+        yield
+    finally:
+        if previous is None:
+            current_omni_platform.unset_device_control_env_var()
+        else:
+            current_omni_platform.set_device_control_env_var(previous)
+
+
+def launch_headless_diffusion_replicas(
+    *,
+    model: str,
+    stage: StageResolvedConfig,
+    stage_id: int,
+    omni_dp_size_local: int,
+    omni_master_address: str,
+    omni_master_port: int,
+    omni_replica_address: str | None,
+    stage_init_timeout: int,
+    per_replica_devices: list[str | None],
+) -> None:
+    """Launch one or more diffusion replicas in headless mode.
+
+    Blocks until a replica exits (sentinel wait).  Handles per-replica device
+    assignment, master-server registration (auto-assigned replica ids), port
+    settlement for multi-replica launches, process spawn + handshake, and
+    cleanup on exit.
+    """
+    from multiprocessing import connection
+
+    from vllm_omni.diffusion.stage_diffusion_proc import (
+        complete_diffusion_handshake,
+        spawn_diffusion_proc,
+    )
+    from vllm_omni.engine.stage_engine_startup import register_stage_with_omni_master
+
+    od_config = stage.diffusion_config
+    if od_config is None:
+        raise ValueError(f"Diffusion stage {stage_id} has no diffusion_config")
+
+    logger.info(
+        "[Headless] Launching %d diffusion replica(s) for stage %d "
+        "via OmniMasterServer at %s:%d",
+        omni_dp_size_local,
+        stage_id,
+        omni_master_address,
+        omni_master_port,
+    )
+
+    procs: list[Any] = []
+    try:
+        for rep_idx in range(omni_dp_size_local):
+            # Auto-assign replica id via master server.
+            response = register_stage_with_omni_master(
+                omni_master_address=omni_master_address,
+                omni_master_port=omni_master_port,
+                omni_stage_id=stage_id,
+                omni_stage_config=stage,
+                replica_id=None,
+                return_full_response=True,
+                replica_bind_address=omni_replica_address,
+            )
+
+            with replica_device_context(stage_id, per_replica_devices[rep_idx]):
+                # Multi-replica port settlement: avoid collisions when
+                # torch.distributed master ports are allocated from the
+                # same base.
+                if omni_dp_size_local > 1:
+                    od_config.master_port = od_config.settle_port(
+                        61000 + rep_idx * 100,
+                        port_inc=37,
+                    )
+                proc, _, _, _ = spawn_diffusion_proc(
+                    model,
+                    od_config,
+                    handshake_address=response.handshake_address,
+                    request_address=response.input_address,
+                    response_address=response.output_address,
+                    omni_coordinator_address=response.coordinator_router_address,
+                    omni_stage_id=stage_id,
+                    omni_replica_id=response.replica_id,
+                )
+
+            complete_diffusion_handshake(proc, response.handshake_address, stage_init_timeout)
+            procs.append(proc)
+            logger.info(
+                "[Headless] Diffusion replica id=%d for stage %d is up (coord=%s)",
+                response.replica_id,
+                stage_id,
+                response.coordinator_router_address,
+            )
+
+        # Block on the sentinel set so any replica crash is detected
+        # immediately.  Any exit triggers fleet shutdown; non-zero exits
+        # propagate.
+        sentinel_to_proc = {p.sentinel: p for p in procs}
+        died = connection.wait(list(sentinel_to_proc.keys()))
+        first = sentinel_to_proc[died[0]]
+        logger.info(
+            "[Headless] Diffusion replica %s exited (code=%s); shutting down stage %d.",
+            first.name,
+            first.exitcode,
+            stage_id,
+        )
+        if first.exitcode not in (None, 0):
+            raise RuntimeError(
+                f"Diffusion stage {stage_id} replica {first.name!r} "
+                f"exited with code {first.exitcode}"
+            )
+    finally:
+        logger.info(
+            "[Headless] Shutting down %d diffusion replica(s) for stage %d.",
+            len(procs),
+            stage_id,
+        )
+        for p in procs:
+            if p.is_alive():
+                terminate_alive_proc(p)
+
+
+def launch_headless_llm_replicas(
+    *,
+    stage: StageResolvedConfig,
+    stage_id: int,
+    omni_dp_size_local: int,
+    omni_master_address: str,
+    omni_master_port: int,
+    omni_replica_address: str | None,
+    log_stats: bool,
+    disable_log_stats: bool,
+    per_replica_devices: list[str | None],
+) -> None:
+    """Launch one or more LLM replicas in headless mode.
+
+    Handles DP Coordinator creation, per-replica device assignment,
+    master-server registration (auto-assigned replica ids),
+    ``OmniCoreEngineProcManager`` spawn, multi-replica liveness monitoring,
+    and cleanup on exit.
+    """
+    import signal
+    import threading
+    from types import FrameType
+
+    from vllm.v1.engine.coordinator import DPCoordinator
+
+    from vllm_omni.engine.omni_core_engine_proc_manager import OmniCoreEngineProcManager
+    from vllm_omni.engine.stage_engine_startup import register_stage_with_omni_master
+
+    vllm_config = stage.vllm_config
+    executor_class = stage.executor_class
+    if vllm_config is None:
+        raise ValueError(f"Stage {stage_id} is LLM type but has no vllm_config")
+
+    parallel_config = vllm_config.parallel_config
+    local_engine_count = parallel_config.data_parallel_size_local
+    if local_engine_count <= 0:
+        raise ValueError("data_parallel_size_local must be > 0 in headless mode")
+
+    # Signal handling for graceful shutdown.
+    shutdown_requested = False
+
+    def _signal_handler(signum: int, frame: FrameType | None) -> None:
+        nonlocal shutdown_requested
+        logger.debug("Received %d signal.", signum)
+        if not shutdown_requested:
+            shutdown_requested = True
+            raise SystemExit
+
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+
+    # DP Coordinator (if needed).
+    dp_rank = parallel_config.data_parallel_rank if parallel_config.data_parallel_rank is not None else 0
+    coordinator: DPCoordinator | None = None
+    if vllm_config.needs_dp_coordinator and dp_rank == 0:
+        coordinator = DPCoordinator(
+            parallel_config,
+            enable_wave_coordination=vllm_config.model_config.is_moe,
+        )
+        logger.info(
+            "[Headless] Started DP Coordinator process for stage %d (PID: %d)",
+            stage_id,
+            coordinator.proc.pid,
+        )
+
+    if disable_log_stats:
+        log_stats = False
+
+    logger.info(
+        "[Headless] Launching %d omni replica(s) (vLLM dp_size_local=%d each) "
+        "for stage %d via OmniMasterServer at %s:%d",
+        omni_dp_size_local,
+        local_engine_count,
+        stage_id,
+        omni_master_address,
+        omni_master_port,
+    )
+
+    engine_managers: list[Any] = []
+    monitor_threads: list[threading.Thread] = []
+
+    def _monitor_target(mgr: Any) -> None:
+        try:
+            mgr.monitor_engine_liveness()
+        except Exception:
+            logger.exception("[Headless] monitor_engine_liveness raised")
+
+    try:
+        for rep_idx in range(omni_dp_size_local):
+            response = register_stage_with_omni_master(
+                omni_master_address=omni_master_address,
+                omni_master_port=omni_master_port,
+                omni_stage_id=stage_id,
+                omni_stage_config=stage,
+                coordinator=coordinator,
+                replica_id=None,
+                return_full_response=True,
+                replica_bind_address=omni_replica_address,
+                replica_binds_sockets=False,
+            )
+
+            with replica_device_context(stage_id, per_replica_devices[rep_idx]):
+                mgr = OmniCoreEngineProcManager(
+                    local_engine_count=local_engine_count,
+                    start_index=dp_rank,
+                    local_start_index=0,
+                    vllm_config=vllm_config,
+                    local_client=False,
+                    handshake_address=response.handshake_address,
+                    executor_class=executor_class,
+                    log_stats=log_stats,
+                    omni_stage_id=stage_id,
+                    omni_coordinator_address=response.coordinator_router_address,
+                    omni_replica_base_id=response.replica_id,
+                )
+
+            engine_managers.append(mgr)
+            logger.info(
+                "[Headless] Stage %d replica id=%d up (coord=%s)",
+                stage_id,
+                response.replica_id,
+                response.coordinator_router_address,
+            )
+
+        # Liveness monitoring — blocks until all subprocesses exit.
+        if len(engine_managers) == 1:
+            engine_managers[0].monitor_engine_liveness()
+        else:
+            for mgr in engine_managers:
+                t = threading.Thread(
+                    target=_monitor_target,
+                    args=(mgr,),
+                    name=f"omni-replica-monitor-{id(mgr):x}",
+                )
+                t.start()
+                monitor_threads.append(t)
+            for t in monitor_threads:
+                t.join()
+    finally:
+        logger.info(
+            "[Headless] Shutting down stage %d (%d managers).",
+            stage_id,
+            len(engine_managers),
+        )
+        for mgr in engine_managers:
+            try:
+                mgr.shutdown()
+            except Exception:
+                logger.exception("[Headless] engine manager shutdown failed")
+        if coordinator is not None:
+            coordinator.shutdown()
