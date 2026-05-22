@@ -467,7 +467,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
     def _find_tts_stage(self):
         """Find and return the TTS stage config, or None if not found."""
         for stage in self.engine_client.stage_configs:
-            if stage.engine_args.model_stage in _TTS_MODEL_STAGES:
+            if getattr(stage, "model_stage", None) in _TTS_MODEL_STAGES:
                 return stage
         return None
 
@@ -475,8 +475,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         """Detect TTS model type from the stage's model_stage attribute."""
         if self._tts_stage is None:
             return None
-        model_stage = getattr(self._tts_stage.engine_args, "model_stage", None)
-        model_arch = getattr(self._tts_stage.engine_args, "model_arch", None)
+        model_stage = getattr(self._tts_stage, "model_stage", None)
+        model_arch = getattr(self._tts_stage, "model_arch", None)
         if model_arch == "VoxCPM2TalkerForConditionalGeneration":
             return "voxcpm2"
         if model_stage in _QWEN3_TTS_MODEL_STAGES:
@@ -490,7 +490,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if model_stage in _OMNIVOICE_TTS_MODEL_STAGES:
             return "omnivoice"
         if model_stage in _COVO_AUDIO_MODEL_STAGES:
-            model_arch = getattr(self._tts_stage.engine_args, "model_arch", None)
+            model_arch = getattr(self._tts_stage, "model_arch", None)
             if model_arch and "CovoAudio" in model_arch:
                 return "covo_audio"
         if model_stage in _VOXCPM2_TTS_MODEL_STAGES:
@@ -1114,7 +1114,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
     def _is_tts_model(self) -> bool:
         """Check if the current model is a supported TTS model."""
-        return any(stage.engine_args.model_stage in _TTS_MODEL_STAGES for stage in self.engine_client.stage_configs)
+        return any(getattr(stage, "model_stage", None) in _TTS_MODEL_STAGES for stage in self.engine_client.stage_configs)
 
     def _validate_tts_request(self, request: OpenAICreateSpeechRequest) -> str | None:
         """Validate TTS request parameters. Returns error message or None."""

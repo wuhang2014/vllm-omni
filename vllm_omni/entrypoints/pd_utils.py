@@ -132,10 +132,10 @@ class PDDisaggregationMixin:
         d_stage = self.stage_configs[d_id]
 
         def _get_kv_cfg(stage: "OmniStage") -> dict[str, Any]:
-            ea = stage.engine_args
-            cfg = getattr(ea, "kv_transfer_config", None)
-            if cfg is None:
-                cfg = ea.get("kv_transfer_config", None) if hasattr(ea, "get") else None
+            vllm_cfg = getattr(stage, "vllm_config", None)
+            if vllm_cfg is None:
+                raise ValueError(f"Stage-{stage.stage_id} is marked for PD but has no vllm_config")
+            cfg = getattr(vllm_cfg, "kv_transfer_config", None)
             if cfg is None:
                 raise ValueError(f"Stage-{stage.stage_id} is marked for PD but has no 'kv_transfer_config'")
             cfg_dict = self._kv_cfg_to_dict(cfg)
@@ -170,8 +170,10 @@ class PDDisaggregationMixin:
             if p_val is not None and d_val is not None and p_val != d_val:
                 raise ValueError(f"PD {key} mismatch: prefill='{p_val}', decode='{d_val}'")
 
-        p_tp = getattr(getattr(p_stage, "engine_args", None), "tensor_parallel_size", 1)
-        d_tp = getattr(getattr(d_stage, "engine_args", None), "tensor_parallel_size", 1)
+        p_tp = getattr(getattr(p_stage, "vllm_config", None), "parallel_config", None)
+        d_tp = getattr(getattr(d_stage, "vllm_config", None), "parallel_config", None)
+        p_tp = getattr(p_tp, "tensor_parallel_size", 1) if p_tp else 1
+        d_tp = getattr(d_tp, "tensor_parallel_size", 1) if d_tp else 1
         if p_tp != d_tp:
             raise ValueError(f"PD stages must have matching tensor_parallel_size: prefill={p_tp}, decode={d_tp}")
 

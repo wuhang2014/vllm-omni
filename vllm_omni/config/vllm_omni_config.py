@@ -100,6 +100,9 @@ class StageResolvedConfig:
     model_stage: str | None = None
     """Stage type identifier (e.g. ``"thinker"`` or ``"talker"``)."""
 
+    model_arch: str | None = None
+    """Model architecture name from pipeline topology."""
+
     cfg_kv_collect_func: Callable[..., Any] | None = None
     """Optional CFG KV collection function for diffusion stages."""
 
@@ -135,18 +138,6 @@ class StageResolvedConfig:
 
     is_decode_only: bool = False
     """True when this stage is a dedicated decode-only stage (PD disagg)."""
-
-    @property
-    def engine_args(self) -> Any:
-        """Expose the underlying vLLM config for PD mixin compat.
-
-        Returns ``vllm_config`` for LLM stages; raises for diffusion.
-        The PD mixin reads ``kv_transfer_config``, ``tensor_parallel_size``,
-        etc. from this object.
-        """
-        if self.vllm_config is not None:
-            return self.vllm_config
-        raise AttributeError(f"Stage {self.stage_id} ({self.stage_type}) has no engine_args")
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +427,8 @@ def _resolve_stages(
                 final_output_type=data.get("final_output_type"),
                 default_sampling_params=data.get("default_sampling_params"),
                 custom_process_input_func=_resolve_dotted_func(data.get("custom_process_input_func")),
-                model_stage=data.get("model_stage"),
+                model_stage=data.get("model_stage") or per_stage_engine_args.get("model_stage"),
+                model_arch=per_stage_engine_args.get("model_arch") or data.get("model_arch"),
                 cfg_kv_collect_func=_resolve_dotted_func(data.get("cfg_kv_collect_func")),
                 num_replicas=num_replicas,
                 runtime=runtime,
