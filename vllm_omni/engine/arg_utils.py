@@ -445,6 +445,61 @@ class OmniEngineArgs(EngineArgs):
         engine_fields = {f.name for f in _dc.fields(cls)}
         return cls(**{k: v for k, v in kwargs.items() if k in engine_fields})
 
+    def _build_single_diffusion_omni_config(self, model: str) -> VllmOmniConfig:
+        """Build a single-stage diffusion ``VllmOmniConfig`` from this engine args.
+
+        Called when no ``stage_overrides`` are present (no pipeline registered
+        for the model).  Constructs ``OmniDiffusionConfig`` directly from the
+        diffusion-specific fields on ``self``, then wraps it in a single-stage
+        ``VllmOmniConfig``.
+        """
+        from vllm_omni.config.vllm_omni_config import StageResolvedConfig, _PerStageCfg
+        from vllm_omni.diffusion.data import OmniDiffusionConfig
+        from vllm_omni.engine.stage_init_utils import extract_stage_metadata
+        from vllm_omni.platforms import current_omni_platform
+
+        worker_type = self.worker_type
+        if worker_type in ("ar", "generation"):
+            return VllmOmniConfig(model=model)
+
+        # Build OmniDiffusionConfig directly from engine args fields.
+        fields = {f.name: getattr(self, f.name) for f in _dc.fields(self) if getattr(self, f.name) is not None}
+        od_config = OmniDiffusionConfig.from_kwargs(**fields)
+
+        # Validate device count.
+        num_devices_per_stage = od_config.parallel_config.world_size
+        device_control_env = current_omni_platform.device_control_env_var
+        visible_devices_str = os.environ.get(device_control_env) if device_control_env else None
+        if visible_devices_str:
+            physical_devices = [d.strip() for d in visible_devices_str.split(",") if d.strip()]
+        else:
+            physical_devices = list(range(current_omni_platform.get_device_count()))
+        if len(physical_devices) < num_devices_per_stage:
+            raise ValueError(
+                f"Diffusion stage requires {num_devices_per_stage} device(s) "
+                f"based on parallel_config, but {len(physical_devices)} device(s) "
+                f"are available: {physical_devices}"
+            )
+        od_config.num_gpus = num_devices_per_stage
+
+        # Build lightweight metadata for the single diffusion stage.
+        stage_cfg = _PerStageCfg(stage_id=0, stage_type="diffusion", engine_args=fields)
+        metadata = extract_stage_metadata(stage_cfg)
+
+        return VllmOmniConfig(
+            model=model,
+            stages=(
+                StageResolvedConfig(
+                    stage_id=0,
+                    stage_type="diffusion",
+                    diffusion_config=od_config,
+                    metadata=metadata,
+                    num_replicas=1,
+                ),
+            ),
+            diffusion_config=od_config,
+        )
+
     def create_omni_config(
         self,
         model: str,
@@ -456,7 +511,6 @@ class OmniEngineArgs(EngineArgs):
         already resolved all defaults before this method is called.
         """
         from vllm_omni.config.vllm_omni_config import (
-            _build_default_diffusion_config,
             _detect_pd_config,
             _parse_stage_overrides,
             _resolve_stages,
@@ -468,10 +522,7 @@ class OmniEngineArgs(EngineArgs):
 
         # 2. Handle no-pipeline case → single diffusion stage.
         if not stage_overrides:
-            return _build_default_diffusion_config(
-                model=model,
-                engine_args=self,
-            )
+            return self._build_single_diffusion_omni_config(model)
 
         # 3. Resolve async_chunk: CLI > deploy YAML > default.
         async_chunk = bool(self.async_chunk)

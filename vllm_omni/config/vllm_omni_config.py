@@ -281,66 +281,6 @@ def _parse_stage_overrides(raw: str | dict[str, Any] | None) -> dict[str, dict[s
         return {}
 
 
-def _build_default_diffusion_config(
-    model: str,
-    engine_args: OmniEngineArgs,
-) -> VllmOmniConfig:
-    """Build a single-stage diffusion ``VllmOmniConfig`` when no
-    ``stage_overrides`` are present (no pipeline registered for the model).
-
-    For ``worker_type="ar"`` or ``"generation"`` returns an empty config.
-    Otherwise builds a single diffusion stage from *engine_args*.
-    """
-    # Defer import to avoid circular dependency.
-    from vllm_omni.engine.stage_init_utils import build_diffusion_config, extract_stage_metadata
-
-    worker_type = getattr(engine_args, "worker_type", None)
-    if worker_type in ("ar", "generation"):
-        return VllmOmniConfig(
-            model=model,
-            stage_init_timeout=engine_args.stage_init_timeout,
-            init_timeout=engine_args.init_timeout,
-            shm_threshold_bytes=engine_args.shm_threshold_bytes,
-            batch_timeout=engine_args.batch_timeout,
-            worker_backend=engine_args.worker_backend,
-            log_stats=engine_args.log_stats,
-        )
-
-    # Build a per-stage cfg protocol object from engine_args.
-    cli_overrides = {
-        f.name: getattr(engine_args, f.name)
-        for f in engine_args.__dataclass_fields__.values()
-        if getattr(engine_args, f.name) is not None
-    }
-    stage_cfg = _PerStageCfg(
-        stage_id=0,
-        stage_type="diffusion",
-        engine_args=cli_overrides,
-    )
-    metadata = extract_stage_metadata(stage_cfg)
-    diffusion_config = build_diffusion_config(model, stage_cfg, metadata)
-
-    return VllmOmniConfig(
-        model=model,
-        stages=(
-            StageResolvedConfig(
-                stage_id=0,
-                stage_type="diffusion",
-                diffusion_config=diffusion_config,
-                metadata=metadata,
-                num_replicas=1,
-            ),
-        ),
-        diffusion_config=diffusion_config,
-        stage_init_timeout=engine_args.stage_init_timeout,
-        init_timeout=engine_args.init_timeout,
-        shm_threshold_bytes=engine_args.shm_threshold_bytes,
-        batch_timeout=engine_args.batch_timeout,
-        worker_backend=engine_args.worker_backend,
-        log_stats=engine_args.log_stats,
-    )
-
-
 def _resolve_stages(
     model: str,
     stage_overrides: dict[str, dict[str, Any]],
