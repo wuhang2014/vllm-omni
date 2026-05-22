@@ -968,7 +968,6 @@ class AsyncOmniEngine:
                                 plan.configured_stage_id,
                                 self.model,
                                 plan.stage_cfg,
-                                plan.stage_cfg,
                                 stage_init_timeout=stage_init_timeout,
                                 batch_size=self.diffusion_batch_size,
                                 use_inline=self.num_stages == 1 and plan.num_replicas == 1,

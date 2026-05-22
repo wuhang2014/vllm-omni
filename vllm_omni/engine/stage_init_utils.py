@@ -932,7 +932,6 @@ def initialize_diffusion_stage(
     stage_id: int,
     model: str,
     stage_cfg: Any,
-    metadata: Any,
     stage_init_timeout: int,
     batch_size: int = 1,
     use_inline: bool = False,
@@ -941,8 +940,7 @@ def initialize_diffusion_stage(
 
     Args:
         model: Model name or path.
-        stage_cfg: Stage configuration.
-        metadata: Extracted stage metadata.
+        stage_cfg: Stage configuration (contains all needed metadata).
         stage_init_timeout: Timeout in seconds for stage initialization handshake
         batch_size: Maximum number of requests to batch together in the
             diffusion engine.  Passed through to ``StageDiffusionClient``
@@ -951,8 +949,8 @@ def initialize_diffusion_stage(
     """
     from vllm_omni.diffusion.stage_diffusion_client import create_diffusion_client
 
-    od_config = build_diffusion_config(model, stage_cfg, metadata)
-    return create_diffusion_client(model, od_config, metadata, stage_init_timeout, batch_size, use_inline)
+    od_config = build_diffusion_config(model, stage_cfg, stage_cfg)
+    return create_diffusion_client(model, od_config, stage_cfg, stage_init_timeout, batch_size, use_inline)
 
 
 # ---------------------------------------------------------------------------
