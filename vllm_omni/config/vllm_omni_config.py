@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     from vllm_omni.config.stage_config import PipelineConfig
     from vllm_omni.diffusion.data import OmniDiffusionConfig
     from vllm_omni.engine.arg_utils import OmniEngineArgs
-    from vllm_omni.engine.stage_init_utils import StageMetadata
 
 logger = init_logger(__name__)
 
@@ -47,8 +46,8 @@ class StageResolvedConfig:
     """Pre-built, immutable config for one logical stage.
 
     All construction (``VllmConfig``, ``OmniDiffusionConfig``,
-    :class:`StageMetadata`, connector resolution, prompt expansion)
-    happens inside :meth:`OmniEngineArgs.create_omni_config`.  Downstream code
+    connector resolution, prompt expansion) happens inside
+    :meth:`OmniEngineArgs.create_omni_config`.  Downstream code
     reads attributes — never rebuilds.
     """
 
@@ -71,10 +70,38 @@ class StageResolvedConfig:
     diffusion_config: OmniDiffusionConfig | None = None
     """Pre-built ``OmniDiffusionConfig`` for diffusion stages (``None`` for LLM)."""
 
-    # ── Metadata ─────────────────────────────────────────────────
+    # ── Per-stage attributes (formerly on StageMetadata) ─────────
 
-    metadata: StageMetadata | None = None
-    """Pre-extracted :class:`~vllm_omni.engine.stage_init_utils.StageMetadata`."""
+    engine_output_type: str | None = None
+    """Optional output type specification for the engine."""
+
+    is_comprehension: bool = False
+    """True when this stage owns the tokenizer (comprehension stage)."""
+
+    requires_multimodal_data: bool = False
+    """True when this stage requires multimodal data preprocessing."""
+
+    engine_input_source: list[int] = field(default_factory=list)
+    """Stage IDs that feed into this stage.  Used for PD detection and
+    KV routing."""
+
+    final_output: bool = False
+    """True when this stage produces the final pipeline output."""
+
+    final_output_type: str | None = None
+    """Output modality of the stage (``"text"``, ``"audio"``, ``"image"``, …)."""
+
+    default_sampling_params: Any = None
+    """Pre-extracted default sampling params (``OmniSamplingParams`` or dict)."""
+
+    custom_process_input_func: Callable[..., Any] | None = None
+    """Optional function that preprocesses input before stage submission."""
+
+    model_stage: str | None = None
+    """Stage type identifier (e.g. ``"thinker"`` or ``"talker"``)."""
+
+    cfg_kv_collect_func: Callable[..., Any] | None = None
+    """Optional CFG KV collection function for diffusion stages."""
 
     # ── Runtime overrides ────────────────────────────────────────
 
@@ -108,13 +135,6 @@ class StageResolvedConfig:
 
     is_decode_only: bool = False
     """True when this stage is a dedicated decode-only stage (PD disagg)."""
-
-    @property
-    def engine_input_source(self) -> list[int]:
-        """Delegate to :attr:`metadata.engine_input_source` for PD detection compat."""
-        if self.metadata is not None:
-            return self.metadata.engine_input_source
-        return []
 
     @property
     def engine_args(self) -> Any:
@@ -391,7 +411,16 @@ def _resolve_stages(
                 vllm_config=vllm_config,
                 executor_class=executor_class,
                 diffusion_config=diffusion_config,
-                metadata=metadata,
+                engine_output_type=metadata.engine_output_type,
+                is_comprehension=metadata.is_comprehension,
+                requires_multimodal_data=metadata.requires_multimodal_data,
+                engine_input_source=metadata.engine_input_source,
+                final_output=metadata.final_output,
+                final_output_type=metadata.final_output_type,
+                default_sampling_params=metadata.default_sampling_params,
+                custom_process_input_func=metadata.custom_process_input_func,
+                model_stage=metadata.model_stage,
+                cfg_kv_collect_func=metadata.cfg_kv_collect_func,
                 num_replicas=num_replicas,
                 runtime=runtime,
                 stage_connector_spec=stage_connector_spec,
