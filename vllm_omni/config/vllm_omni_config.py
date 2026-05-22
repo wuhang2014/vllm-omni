@@ -285,15 +285,19 @@ def _resolve_stages(
         ``(resolved_stages, top_level_diffusion_config, prompt_expand_func)``.
     """
     # Defer imports to avoid circular dependency.
+    import dataclasses as _dc
+    import importlib
+    import os
+
     from vllm_omni.distributed.omni_connectors.utils.initialization import (
         resolve_omni_kv_config_for_stage,
     )
+    from vllm_omni.diffusion.data import OmniDiffusionConfig
     from vllm_omni.engine.stage_init_utils import (
-        build_diffusion_config_from_fields,
         build_vllm_config_from_engine_args,
         get_stage_connector_spec,
     )
-    from vllm_omni.entrypoints.utils import filter_dataclass_kwargs
+    from vllm_omni.platforms import current_omni_platform
 
     # OmniEngineArgs needed to build per-stage engine args.
     from vllm_omni.engine.arg_utils import OmniEngineArgs as _OA
@@ -305,18 +309,23 @@ def _resolve_stages(
     # Sort stage IDs to ensure consistent ordering.
     sorted_stage_ids = sorted(stage_overrides.keys(), key=int)
 
+    # Base fields from engine_args (pipeline-wide values).
+    base_fields = {
+        f.name: getattr(engine_args, f.name)
+        for f in engine_args.__dataclass_fields__.values()
+        if getattr(engine_args, f.name) is not None
+    }
+
     for stage_id_str in sorted_stage_ids:
         stage_id = int(stage_id_str)
         data = stage_overrides[stage_id_str]
 
         stage_type: str = data.get("stage_type", "llm")
 
-        # Build per-stage fields dict from engine_args + stage_overrides.
-        per_stage_fields: dict[str, Any] = {
-            **{f.name: getattr(engine_args, f.name) for f in engine_args.__dataclass_fields__.values() if getattr(engine_args, f.name) is not None},
-            **{k: v for k, v in data.get("engine_args", {}).items() if v is not None},
+        # Per-stage overrides from stage_overrides data.
+        per_stage_overrides = {
+            k: v for k, v in data.get("engine_args", {}).items() if v is not None
         }
-        per_stage_fields["stage_id"] = stage_id
 
         default_sp: dict[str, Any] = data.get("default_sampling_params", {})
         runtime: dict[str, Any] = data.get("runtime", {})
@@ -339,18 +348,36 @@ def _resolve_stages(
         omni_kv_connector = resolve_omni_kv_config_for_stage(omni_transfer_config, stage_id)
 
         if stage_type == "diffusion":
-            diffusion_config = build_diffusion_config_from_fields(
-                per_stage_fields, stage_id, model,
-                cfg_kv_collect_func=_resolve_dotted_func(data.get("cfg_kv_collect_func")),
-            )
+            # Build OmniDiffusionConfig directly from merged fields.
+            merged_fields = {**base_fields, **per_stage_overrides}
+            od_config = OmniDiffusionConfig.from_kwargs(**merged_fields)
+            num_devices = od_config.parallel_config.world_size
+            device_env = current_omni_platform.device_control_env_var
+            visible = os.environ.get(device_env) if device_env else None
+            if visible:
+                physical = [d.strip() for d in visible.split(",") if d.strip()]
+            else:
+                physical = list(range(current_omni_platform.get_device_count()))
+            if len(physical) < num_devices:
+                raise ValueError(
+                    f"Stage {stage_id} requires {num_devices} device(s) "
+                    f"based on parallel_config, but {len(physical)} device(s) "
+                    f"are available: {physical}"
+                )
+            od_config.num_gpus = num_devices
+            cfg_func = _resolve_dotted_func(data.get("cfg_kv_collect_func"))
+            if cfg_func is not None:
+                od_config.cfg_kv_collect_func = cfg_func
+            diffusion_config = od_config
             if top_level_diffusion_config is None:
                 top_level_diffusion_config = diffusion_config
             vllm_config = None
             executor_class = None
         else:
-            # Build per-stage OmniEngineArgs, then create VllmConfig.
-            omni_engine_args = _OA(**filter_dataclass_kwargs(_OA, per_stage_fields))
-            vllm_config, executor_class = build_vllm_config_from_engine_args(omni_engine_args)
+            # Build per-stage OmniEngineArgs by overlaying per-stage overrides.
+            per_stage_ea = _dc.replace(engine_args, **per_stage_overrides)
+            per_stage_ea.stage_id = stage_id
+            vllm_config, executor_class = build_vllm_config_from_engine_args(per_stage_ea)
             diffusion_config = None
 
         resolved_stages.append(
@@ -368,8 +395,8 @@ def _resolve_stages(
                 final_output_type=data.get("final_output_type"),
                 default_sampling_params=data.get("default_sampling_params"),
                 custom_process_input_func=_resolve_dotted_func(data.get("custom_process_input_func")),
-                model_stage=data.get("model_stage") or per_stage_engine_args.get("model_stage"),
-                model_arch=per_stage_engine_args.get("model_arch") or data.get("model_arch"),
+                model_stage=data.get("model_stage") or per_stage_overrides.get("model_stage"),
+                model_arch=per_stage_overrides.get("model_arch") or data.get("model_arch"),
                 cfg_kv_collect_func=_resolve_dotted_func(data.get("cfg_kv_collect_func")),
                 num_replicas=num_replicas,
                 runtime=runtime,
