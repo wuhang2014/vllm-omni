@@ -262,15 +262,6 @@ class _PerStageCfg:
 # Factory helpers
 # ---------------------------------------------------------------------------
 
-_ORCHESTRATOR_KWARG_DEFAULTS: dict[str, Any] = {
-    "stage_init_timeout": 300,
-    "init_timeout": 600,
-    "shm_threshold_bytes": 65536,
-    "batch_timeout": 10,
-    "worker_backend": "multi_process",
-    "log_stats": False,
-}
-
 
 def _parse_stage_overrides(raw: str | dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     """Parse *stage_overrides* from a JSON string or dict into a typed dict.
@@ -291,7 +282,6 @@ def _parse_stage_overrides(raw: str | dict[str, Any] | None) -> dict[str, dict[s
 def _build_default_diffusion_config(
     model: str,
     engine_args: OmniEngineArgs,
-    **orchestrator_kwargs: Any,
 ) -> VllmOmniConfig:
     """Build a single-stage diffusion ``VllmOmniConfig`` when no
     ``stage_overrides`` are present (no pipeline registered for the model).
@@ -306,7 +296,12 @@ def _build_default_diffusion_config(
     if worker_type in ("ar", "generation"):
         return VllmOmniConfig(
             model=model,
-            **{k: orchestrator_kwargs.get(k, v) for k, v in _ORCHESTRATOR_KWARG_DEFAULTS.items()},
+            stage_init_timeout=engine_args.stage_init_timeout,
+            init_timeout=engine_args.init_timeout,
+            shm_threshold_bytes=engine_args.shm_threshold_bytes,
+            batch_timeout=engine_args.batch_timeout,
+            worker_backend=engine_args.worker_backend,
+            log_stats=engine_args.log_stats,
         )
 
     # Build a per-stage cfg protocol object from engine_args.
@@ -335,7 +330,12 @@ def _build_default_diffusion_config(
             ),
         ),
         diffusion_config=diffusion_config,
-        **{k: orchestrator_kwargs.get(k, v) for k, v in _ORCHESTRATOR_KWARG_DEFAULTS.items()},
+        stage_init_timeout=engine_args.stage_init_timeout,
+        init_timeout=engine_args.init_timeout,
+        shm_threshold_bytes=engine_args.shm_threshold_bytes,
+        batch_timeout=engine_args.batch_timeout,
+        worker_backend=engine_args.worker_backend,
+        log_stats=engine_args.log_stats,
     )
 
 
@@ -538,12 +538,6 @@ def build_vllm_omni_config(
         return _build_default_diffusion_config(
             model=model,
             engine_args=engine_args,
-            stage_init_timeout=stage_init_timeout,
-            init_timeout=init_timeout,
-            shm_threshold_bytes=shm_threshold_bytes,
-            batch_timeout=batch_timeout,
-            worker_backend=worker_backend,
-            log_stats=log_stats,
         )
 
     # 3. Resolve async_chunk: CLI > deploy YAML > default.
