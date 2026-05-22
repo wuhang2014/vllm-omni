@@ -45,7 +45,6 @@ class ReplicaInitPlan:
     num_replicas: int
     launch_mode: str
     stage_cfg: Any
-    metadata: Any
     stage_connector_spec: dict[str, Any]
     omni_kv_connector: tuple[dict[str, Any] | None, str | None, str | None]
     stage_vllm_config: Any | None = None
@@ -73,7 +72,6 @@ class StageRemoteFactoryContext:
     stage_id: int
     stage_type: str
     stage_cfg: Any
-    base_metadata: Any
     # LLM-only fields:
     vllm_config: Any | None = None
     executor_class: type | None = None
@@ -105,12 +103,11 @@ def capture_stage_factory_contexts(
             continue
         template = plan.replicas[0]
         stage_id = int(plan.configured_stage_id)
-        stage_type = template.metadata.stage_type or "llm"
+        stage_type = getattr(template.stage_cfg, "stage_type", "llm")
         contexts[stage_id] = StageRemoteFactoryContext(
             stage_id=stage_id,
             stage_type=stage_type,
             stage_cfg=template.stage_cfg,
-            base_metadata=template.metadata,
             vllm_config=template.stage_vllm_config,
             executor_class=template.executor_class,
             diffusion_batch_size=diffusion_batch_size,
@@ -343,116 +340,6 @@ def inject_kv_stage_info(stage_cfg: Any, stage_id: int, stage_configs: Sequence[
             )
     except Exception as e:
         logger.debug("Failed to inject stage info into omni_kv_config: %s", e)
-
-
-@dataclass
-class StageMetadata:
-    """Lightweight stage attributes extracted from stage_config."""
-
-    stage_id: int
-    stage_type: Literal["llm", "diffusion"]
-    engine_output_type: str | None
-    is_comprehension: bool
-    requires_multimodal_data: bool
-    engine_input_source: list[int]
-    final_output: bool
-    final_output_type: str | None
-    default_sampling_params: OmniSamplingParams
-    custom_process_input_func: Callable | None
-    model_stage: str | None
-    runtime_cfg: Any
-    prompt_expand_func: Callable | None = None
-    cfg_kv_collect_func: Callable | None = None
-    # Multi-replica: replica_id distinguishes replicas of the same stage.
-    # For single-replica stages this defaults to 0.
-    replica_id: int = 0
-
-
-def extract_stage_metadata(stage_config: Any) -> StageMetadata:
-    """Pure data extraction from a stage_config object."""
-    stage_id: int = stage_config.stage_id
-    stage_type: Literal["llm", "diffusion"] = getattr(stage_config, "stage_type", "llm")
-    engine_args = stage_config.engine_args
-
-    if current_omni_platform.is_rocm():
-        if stage_type != "diffusion" and engine_args.get("attention_backend") is None:
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            if rocm_aiter_ops.is_enabled():
-                engine_args["attention_backend"] = "ROCM_AITER_FA"
-            # Before vLLM v0.19.0, the default attention backend is TRITON_ATTN for ROCm.
-            # Since vLLM v0.19.0, the default attention backend is ROCM_ATTN for ROCm.
-            # However, the compatibility of ROCM_ATTN with Omni is not guaranteed.
-            # Therefore, we still use TRITON_ATTN as the default attention backend,
-            # when the selected_backend is not specified.
-            engine_args["attention_backend"] = "TRITON_ATTN"
-
-    runtime_cfg = getattr(stage_config, "runtime", {})
-    engine_input_source: list[int] = getattr(stage_config, "engine_input_source", [])
-    final_output: bool = getattr(stage_config, "final_output", False)
-    final_output_type: str | None = getattr(stage_config, "final_output_type", None)
-
-    default_sp = _to_dict(getattr(stage_config, "default_sampling_params", {}))
-    SPClass = SamplingParams if stage_type == "llm" else OmniDiffusionSamplingParams
-    default_sampling_params: OmniSamplingParams = SPClass(**default_sp)
-
-    custom_process_input_func: Callable | None = None
-    _cpif_path = getattr(stage_config, "custom_process_input_func", None)
-    if _cpif_path:
-        mod_path, fn_name = _cpif_path.rsplit(".", 1)
-        custom_process_input_func = getattr(importlib.import_module(mod_path), fn_name)
-
-    prompt_expand_func: Callable | None = None
-    _pef_path = getattr(stage_config, "prompt_expand_func", None)
-    if _pef_path:
-        _mod, _fn = _pef_path.rsplit(".", 1)
-        prompt_expand_func = getattr(importlib.import_module(_mod), _fn)
-
-    cfg_kv_collect_func: Callable | None = None
-    _ckf_path = getattr(stage_config, "cfg_kv_collect_func", None)
-    if _ckf_path:
-        _mod, _fn = _ckf_path.rsplit(".", 1)
-        cfg_kv_collect_func = getattr(importlib.import_module(_mod), _fn)
-
-    if stage_type == "diffusion":
-        return StageMetadata(
-            stage_id=stage_id,
-            stage_type="diffusion",
-            engine_output_type=None,
-            is_comprehension=False,
-            requires_multimodal_data=False,
-            engine_input_source=engine_input_source,
-            final_output=final_output,
-            final_output_type=final_output_type,
-            default_sampling_params=default_sampling_params,
-            custom_process_input_func=custom_process_input_func,
-            model_stage=None,
-            runtime_cfg=runtime_cfg,
-            cfg_kv_collect_func=cfg_kv_collect_func,
-        )
-
-    model_stage = getattr(engine_args, "model_stage", None)
-    engine_output_type = getattr(engine_args, "engine_output_type", None)
-    is_comprehension = getattr(stage_config, "is_comprehension", False)
-    requires_multimodal_data = getattr(runtime_cfg, "requires_multimodal_data", False)
-
-    return StageMetadata(
-        stage_id=stage_id,
-        stage_type=stage_type,
-        engine_output_type=engine_output_type,
-        is_comprehension=is_comprehension,
-        requires_multimodal_data=requires_multimodal_data,
-        engine_input_source=engine_input_source,
-        final_output=final_output,
-        final_output_type=final_output_type,
-        default_sampling_params=default_sampling_params,
-        custom_process_input_func=custom_process_input_func,
-        model_stage=model_stage,
-        runtime_cfg=runtime_cfg,
-        prompt_expand_func=prompt_expand_func,
-    )
-
-
 def prepare_engine_environment() -> None:
     """One-time global setup: load plugins, set multiprocessing spawn method."""
     from vllm_omni.plugins import load_omni_general_plugins
@@ -986,7 +873,7 @@ def get_stage_connector_spec(
 def build_diffusion_config(
     model: str,
     stage_cfg: Any,
-    metadata: StageMetadata,
+    metadata: Any,
 ) -> Any:
     """Build diffusion config for a stage."""
 
@@ -1017,7 +904,7 @@ def initialize_diffusion_stage(
     stage_id: int,
     model: str,
     stage_cfg: Any,
-    metadata: StageMetadata,
+    metadata: Any,
     stage_init_timeout: int,
     batch_size: int = 1,
     use_inline: bool = False,

@@ -21,7 +21,7 @@ from vllm_omni.diffusion.data import DiffusionRequestAbortedError
 from vllm_omni.diffusion.diffusion_engine import DiffusionEngine
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.engine.stage_client import StageClientBase
-from vllm_omni.engine.stage_init_utils import StageMetadata
+from vllm_omni.engine.stage_init_utils import Any
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.outputs import OmniRequestOutput
 
@@ -43,7 +43,7 @@ class InlineStageDiffusionClient(StageClientBase):
         self,
         model: str,
         od_config: OmniDiffusionConfig,
-        metadata: StageMetadata,
+        metadata: Any,
         batch_size: int = 1,
     ) -> None:
         self.model = model

@@ -29,7 +29,7 @@ from vllm_omni.distributed.omni_connectors.utils.initialization import (
 )
 from vllm_omni.distributed.omni_connectors.utils.kv_utils import kv_zmq_port
 from vllm_omni.engine.stage_client import StageClientBase
-from vllm_omni.engine.stage_init_utils import StageMetadata
+from vllm_omni.engine.stage_init_utils import Any
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreOutput
@@ -86,7 +86,7 @@ class StageEngineCoreClientBase(StageClientBase):
         vllm_config: Any,
         executor_class: type,
         log_stats: bool = False,
-        metadata: StageMetadata | None = None,
+        metadata: Any | None = None,
         client_addresses: dict[str, str] | None = None,
         proc: Any = None,
         engine_manager: Any = None,
@@ -124,7 +124,7 @@ class StageEngineCoreClientBase(StageClientBase):
         client_count: int = 1,
         client_index: int = 0,
         *,
-        metadata: StageMetadata | None = None,
+        metadata: Any | None = None,
         engine_manager: Any = None,
         coordinator: Any = None,
     ):

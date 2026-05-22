@@ -31,7 +31,7 @@ from vllm_omni.distributed.omni_connectors.utils.serialization import (
     OmniMsgpackEncoder,
 )
 from vllm_omni.engine.stage_client import StageClientBase
-from vllm_omni.engine.stage_init_utils import StageMetadata, terminate_alive_proc
+from vllm_omni.engine.stage_init_utils import Any, terminate_alive_proc
 from vllm_omni.outputs import OmniRequestOutput
 
 if TYPE_CHECKING:
@@ -44,7 +44,7 @@ logger = init_logger(__name__)
 def create_diffusion_client(
     model: str,
     od_config: OmniDiffusionConfig,
-    metadata: StageMetadata,
+    metadata: Any,
     stage_init_timeout: int,
     batch_size: int = 1,
     use_inline: bool = False,
@@ -76,7 +76,7 @@ class StageDiffusionClient(StageClientBase):
         self,
         model: str,
         od_config: OmniDiffusionConfig,
-        metadata: StageMetadata,
+        metadata: Any,
         stage_init_timeout: int,
         batch_size: int = 1,
     ) -> None:
@@ -88,7 +88,7 @@ class StageDiffusionClient(StageClientBase):
     @classmethod
     def from_addresses(
         cls,
-        metadata: StageMetadata,
+        metadata: Any,
         request_address: str,
         response_address: str,
         *,
@@ -108,7 +108,7 @@ class StageDiffusionClient(StageClientBase):
 
     def _initialize_client(
         self,
-        metadata: StageMetadata,
+        metadata: Any,
         request_address: str,
         response_address: str,
         *,

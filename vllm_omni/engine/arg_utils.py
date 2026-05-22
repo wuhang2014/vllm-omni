@@ -453,9 +453,8 @@ class OmniEngineArgs(EngineArgs):
         diffusion-specific fields on ``self``, then wraps it in a single-stage
         ``VllmOmniConfig``.
         """
-        from vllm_omni.config.vllm_omni_config import StageResolvedConfig, _PerStageCfg
+        from vllm_omni.config.vllm_omni_config import StageResolvedConfig, _PerStageCfg, _resolve_dotted_func
         from vllm_omni.diffusion.data import OmniDiffusionConfig
-        from vllm_omni.engine.stage_init_utils import extract_stage_metadata
         from vllm_omni.platforms import current_omni_platform
 
         worker_type = self.worker_type
@@ -484,7 +483,6 @@ class OmniEngineArgs(EngineArgs):
 
         # Build lightweight metadata for the single diffusion stage.
         stage_cfg = _PerStageCfg(stage_id=0, stage_type="diffusion", engine_args=fields)
-        metadata = extract_stage_metadata(stage_cfg)
 
         return VllmOmniConfig(
             model=model,
@@ -493,16 +491,8 @@ class OmniEngineArgs(EngineArgs):
                     stage_id=0,
                     stage_type="diffusion",
                     diffusion_config=od_config,
-                    engine_output_type=metadata.engine_output_type,
-                    is_comprehension=metadata.is_comprehension,
-                    requires_multimodal_data=metadata.requires_multimodal_data,
-                    engine_input_source=metadata.engine_input_source,
-                    final_output=metadata.final_output,
-                    final_output_type=metadata.final_output_type,
-                    default_sampling_params=metadata.default_sampling_params,
-                    custom_process_input_func=metadata.custom_process_input_func,
-                    model_stage=metadata.model_stage,
-                    cfg_kv_collect_func=metadata.cfg_kv_collect_func,
+                    engine_output_type=None,
+                    final_output=True,
                     num_replicas=1,
                 ),
             ),

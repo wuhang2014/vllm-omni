@@ -285,6 +285,19 @@ class _PerStageCfg:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_dotted_func(path: str | None) -> Any:
+    """Resolve a dotted import string to a callable, or return None."""
+    if not path:
+        return None
+    if callable(path):
+        return path
+    try:
+        mod_path, fn_name = path.rsplit(".", 1)
+        return getattr(__import__(mod_path, fromlist=[fn_name]), fn_name)
+    except Exception:
+        return None
+
+
 def _parse_stage_overrides(raw: str | dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     """Parse *stage_overrides* from a JSON string or dict into a typed dict.
 
@@ -324,7 +337,6 @@ def _resolve_stages(
         build_diffusion_config,
         build_engine_args_dict,
         build_vllm_config,
-        extract_stage_metadata,
         get_stage_connector_spec,
     )
 
@@ -361,9 +373,14 @@ def _resolve_stages(
             default_sampling_params=default_sp,
         )
 
-        metadata = extract_stage_metadata(stage_cfg)
-        if metadata.prompt_expand_func is not None:
-            prompt_expand_func = metadata.prompt_expand_func
+        # prompt_expand_func from stage_overrides data
+        pef = data.get("prompt_expand_func")
+        if pef and prompt_expand_func is None:
+            if callable(pef):
+                prompt_expand_func = pef
+            elif isinstance(pef, str):
+                _mod, _fn = pef.rsplit(".", 1)
+                prompt_expand_func = getattr(importlib.import_module(_mod), _fn)
 
         stage_connector_spec = get_stage_connector_spec(
             omni_transfer_config=omni_transfer_config,
@@ -373,7 +390,7 @@ def _resolve_stages(
         omni_kv_connector = resolve_omni_kv_config_for_stage(omni_transfer_config, stage_id)
 
         if stage_type == "diffusion":
-            diffusion_config = build_diffusion_config(model, stage_cfg, metadata)
+            diffusion_config = build_diffusion_config(model, stage_cfg, stage_cfg)
             if top_level_diffusion_config is None:
                 top_level_diffusion_config = diffusion_config
             vllm_config = None
@@ -411,16 +428,16 @@ def _resolve_stages(
                 vllm_config=vllm_config,
                 executor_class=executor_class,
                 diffusion_config=diffusion_config,
-                engine_output_type=metadata.engine_output_type,
-                is_comprehension=metadata.is_comprehension,
-                requires_multimodal_data=metadata.requires_multimodal_data,
-                engine_input_source=metadata.engine_input_source,
-                final_output=metadata.final_output,
-                final_output_type=metadata.final_output_type,
-                default_sampling_params=metadata.default_sampling_params,
-                custom_process_input_func=metadata.custom_process_input_func,
-                model_stage=metadata.model_stage,
-                cfg_kv_collect_func=metadata.cfg_kv_collect_func,
+                engine_output_type=data.get("engine_output_type"),
+                is_comprehension=data.get("is_comprehension", False),
+                requires_multimodal_data=data.get("requires_multimodal_data", False),
+                engine_input_source=data.get("input_sources", data.get("engine_input_source", [])),
+                final_output=data.get("final_output", False),
+                final_output_type=data.get("final_output_type"),
+                default_sampling_params=data.get("default_sampling_params"),
+                custom_process_input_func=_resolve_dotted_func(data.get("custom_process_input_func")),
+                model_stage=data.get("model_stage"),
+                cfg_kv_collect_func=_resolve_dotted_func(data.get("cfg_kv_collect_func")),
                 num_replicas=num_replicas,
                 runtime=runtime,
                 stage_connector_spec=stage_connector_spec,
