@@ -943,6 +943,7 @@ class OmniArgumentParser(FlexibleArgumentParser):
             deploy_path = Path(deploy_config_path)
             if not deploy_path.exists():
                 return
+            model_type = deploy_path.stem
         else:
             model_type, _hf_config = _auto_detect_model_type(model)
             if not model_type:
@@ -951,7 +952,7 @@ class OmniArgumentParser(FlexibleArgumentParser):
             if not deploy_path.exists():
                 return
 
-        self._omni_model_type = model_type if not deploy_config_path else None
+        self._omni_model_type = model_type
 
         try:
             deploy = load_deploy_config(deploy_path)

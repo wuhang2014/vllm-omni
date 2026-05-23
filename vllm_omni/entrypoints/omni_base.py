@@ -148,6 +148,8 @@ def _inject_deploy_defaults(model: str, kwargs: dict[str, Any]) -> None:
         deploy_path = Path(deploy_config_path)
         if not deploy_path.exists():
             return
+        # Detect model_type from deploy config file name.
+        model_type = deploy_path.stem
     else:
         model_type, _hf_config = _auto_detect_model_type(model)
         if not model_type:
@@ -172,12 +174,8 @@ def _inject_deploy_defaults(model: str, kwargs: dict[str, Any]) -> None:
             kwargs.setdefault(f.name, val)
 
     # Pipeline topology from registry.
-    pipeline_key = deploy.pipeline or (model_type if "model_type" in dir() else None)
-    # model_type may not be defined if deploy_config_path was used.
-    try:
-        pipeline = _PIPELINE_REGISTRY.get(pipeline_key) if pipeline_key else None
-    except Exception:
-        pipeline = None
+    pipeline_key = deploy.pipeline or model_type
+    pipeline = _PIPELINE_REGISTRY.get(pipeline_key) if pipeline_key else None
 
     # Per-stage.
     stage_id = kwargs.get("stage_id")
