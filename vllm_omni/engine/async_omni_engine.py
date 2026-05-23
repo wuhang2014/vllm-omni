@@ -505,7 +505,6 @@ class AsyncOmniEngine:
                         num_replicas=num_replicas,
                         launch_mode=launch_mode,
                         stage_cfg=replica_cfg,
-                        metadata=replica_cfg,
                         stage_connector_spec=stage_connector_spec,
                         omni_kv_connector=omni_kv_connector,
                         stage_vllm_config=stage_vllm_config,
@@ -659,7 +658,7 @@ class AsyncOmniEngine:
         client = StageEngineCoreClientBase.make_async_mp_client(
             vllm_config=ctx_vllm_config,
             executor_class=ctx_executor_class,
-            metadata=metadata,
+            metadata=ctx.stage_cfg,
             client_addresses=client_addresses,
             proc=None,
             engine_manager=engine_manager,
