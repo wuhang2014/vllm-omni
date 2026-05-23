@@ -405,13 +405,15 @@ def _detect_pd_config(
 ) -> dict[str, Any] | None:
     """Detect PD disaggregation from resolved :class:`StageResolvedConfig` objects.
 
-    Uses ``is_prefill_only`` / ``is_decode_only`` flags and
-    :class:`~vllm_omni.entrypoints.pd_utils.PDDisaggregationMixin`.
+    Uses ``is_prefill_only`` / ``is_decode_only`` flags and extracts
+    ``bootstrap_addr`` from the prefill stage's ``vllm_config``.
+
+    Returns ``{"pd_pair": (prefill_idx, decode_idx), "bootstrap_addr": ...}``
+    or ``None``.
     """
     try:
         from vllm_omni.entrypoints.pd_utils import PDDisaggregationMixin
 
-        # Build lightweight wrappers for the PD mixin.
         class _PDStage:
             __slots__ = ("stage_id", "is_prefill_only", "is_decode_only", "engine_input_source")
 
@@ -425,7 +427,25 @@ def _detect_pd_config(
         pd_pair = PDDisaggregationMixin.detect_pd_separation_from_stage_configs(wrappers)
         if pd_pair is None:
             return None
-        return {"pd_pair": pd_pair}
+
+        prefill_idx, decode_idx = pd_pair
+
+        # Extract bootstrap address from prefill stage's vllm_config.
+        bootstrap_addr: str | None = None
+        prefill_stage = resolved_stages[prefill_idx]
+        if prefill_stage.vllm_config is not None:
+            from vllm import envs as vllm_envs
+
+            kv_cfg = getattr(prefill_stage.vllm_config, "kv_transfer_config", None)
+            if kv_cfg is not None:
+                port = getattr(vllm_envs, "VLLM_MOONCAKE_BOOTSTRAP_PORT", None) or 25201
+                kv_ip = getattr(kv_cfg, "kv_ip", None) or "127.0.0.1"
+                bootstrap_addr = f"http://{kv_ip}:{port}"
+
+        return {
+            "pd_pair": pd_pair,
+            "bootstrap_addr": bootstrap_addr,
+        }
     except (ImportError, AttributeError, TypeError) as exc:
         logger.debug(
             "[build_vllm_omni_config] PD detection failed: %s. PD disaggregation disabled.",
