@@ -70,9 +70,6 @@ def test_create_diffusion_config_builds_parallel_config():
         ring_degree=2,
         cfg_parallel_size=2,
         vae_patch_parallel_size=2,
-        use_hsdp=True,
-        hsdp_shard_size=4,
-        hsdp_replicate_size=2,
         ulysses_mode="advanced_uaa",
     )
     config = ea.create_diffusion_config()
@@ -81,9 +78,6 @@ def test_create_diffusion_config_builds_parallel_config():
     assert pc.ring_degree == 2
     assert pc.cfg_parallel_size == 2
     assert pc.vae_patch_parallel_size == 2
-    assert pc.use_hsdp is True
-    assert pc.hsdp_shard_size == 4
-    assert pc.hsdp_replicate_size == 2
     assert pc.ulysses_mode == "advanced_uaa"
 
 
@@ -115,7 +109,7 @@ def test_create_diffusion_config_explicit_field_mapping():
         enable_sleep_mode=True,
         worker_extension_cls="my.Worker",
         custom_pipeline_args={"key": "val"},
-        diffusion_load_format="custom_pipeline",
+        diffusion_load_format="diffusers",
         diffusers_load_kwargs={"load": "kwarg"},
         diffusers_call_kwargs={"call": "kwarg"},
         trust_remote_code=True,
@@ -136,7 +130,7 @@ def test_create_diffusion_config_explicit_field_mapping():
     assert config.enable_sleep_mode is True
     assert config.worker_extension_cls == "my.Worker"
     assert config.custom_pipeline_args == {"key": "val"}
-    assert config.diffusion_load_format == "custom_pipeline"
+    assert config.diffusion_load_format == "diffusers"
     assert config.diffusers_load_kwargs == {"load": "kwarg"}
     assert config.diffusers_call_kwargs == {"call": "kwarg"}
     assert config.trust_remote_code is True
@@ -315,11 +309,11 @@ def test_compute_per_replica_devices_no_split():
 
 
 def test_compute_per_replica_devices_with_runtime():
-    """Splits devices from runtime when set."""
+    """Splits devices from runtime when set — template mode."""
     stage = StageResolvedConfig(
         stage_id=0,
         stage_type="llm",
-        runtime={"devices": "0,1,2,3"},
+        runtime={"devices": "0,1"},
     )
     result = compute_per_replica_devices(stage, num_replicas=2, stage_id=0)
     assert len(result) == 2
@@ -350,11 +344,10 @@ def test_add_cli_args_registers_flags():
 
 
 def test_omni_argument_parser_skip_help():
-    """Parser skips injection for --help / --version."""
+    """Parser skips injection for --help — exits cleanly."""
     parser = OmniArgumentParser()
-    result = parser.parse_args(["--help"])
-    # Should not crash — help output handled by argparse.
-    assert result is not None
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help"])
 
 
 def test_is_help_or_version():

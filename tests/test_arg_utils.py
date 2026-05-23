@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import fields as dc_fields
+from dataclasses import MISSING, fields as dc_fields
 
 import pytest
 
@@ -23,7 +23,7 @@ def test_all_cli_friendly_fields_have_defaults():
     """Every field on OmniEngineArgs has a default (no required fields)."""
     fields_without_defaults = []
     for f in dc_fields(OmniEngineArgs):
-        if f.default is dc_fields.MISSING and f.default_factory is dc_fields.MISSING:
+            if f.default is MISSING and f.default_factory is MISSING:
             fields_without_defaults.append(f.name)
     assert not fields_without_defaults, (
         f"Fields without defaults: {fields_without_defaults}"
@@ -56,13 +56,13 @@ def test_add_cli_args_omni_only():
 class TestOmniArgumentParser:
     def test_skip_on_help(self):
         parser = OmniArgumentParser()
-        result = parser.parse_args(["--help"])
-        assert result is not None
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--help"])
 
     def test_skip_on_version(self):
         parser = OmniArgumentParser()
-        result = parser.parse_args(["--version"])
-        assert result is not None
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--version"])
 
     def test_peek_model_from_positional(self):
         assert OmniArgumentParser._peek_model(["serve", "Qwen/Qwen-Image"]) == "Qwen/Qwen-Image"
