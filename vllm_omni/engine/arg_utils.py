@@ -1094,8 +1094,10 @@ def _build_one_stage_entry(
     engine_args: dict[str, Any] = {}
 
     # Pipeline topology fields.
-    # model_arch comes from pipeline config (if not set on the stage).
-    engine_args["model_arch"] = getattr(ps, "model_arch", None) or pipeline_model_arch
+    # model_arch only applies to the comprehension stage (owns_tokenizer=True);
+    # other stages use the base checkpoint architecture.
+    if ps.owns_tokenizer and pipeline_model_arch:
+        engine_args["model_arch"] = pipeline_model_arch
     for name in ("engine_output_type", "hf_config_name", "model_subdir", "tokenizer_subdir"):
         val = getattr(ps, name, None)
         if val is not None:
