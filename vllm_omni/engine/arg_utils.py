@@ -1059,9 +1059,10 @@ def _build_unified_stage_overrides(
 
     # Determine stages from pipeline (primary) or deploy YAML (fallback).
     if pipeline is not None:
+        pipeline_model_arch = getattr(pipeline, "model_arch", None)
         for ps in pipeline.stages:
             ds = deploy_by_id.get(ps.stage_id)
-            entry = _build_one_stage_entry(ps, ds, deploy, _PIPELINE_WIDE_ENGINE_FIELDS)
+            entry = _build_one_stage_entry(ps, ds, deploy, _PIPELINE_WIDE_ENGINE_FIELDS, pipeline_model_arch=pipeline_model_arch)
             result[str(ps.stage_id)] = entry
     else:
         # No pipeline — stages defined purely by deploy YAML.
@@ -1077,6 +1078,7 @@ def _build_one_stage_entry(
     ds: _StageDeployConfig | None,
     deploy: Any,  # DeployConfig
     pipeline_wide_fields: tuple[str, ...],
+    pipeline_model_arch: str | None = None,
 ) -> dict[str, Any]:
     """Build one stage override entry from pipeline topology + deploy YAML."""
     from dataclasses import fields as dc_fields
@@ -1092,7 +1094,9 @@ def _build_one_stage_entry(
     engine_args: dict[str, Any] = {}
 
     # Pipeline topology fields.
-    for name in ("model_arch", "engine_output_type", "hf_config_name", "model_subdir", "tokenizer_subdir"):
+    # model_arch comes from pipeline config (if not set on the stage).
+    engine_args["model_arch"] = getattr(ps, "model_arch", None) or pipeline_model_arch
+    for name in ("engine_output_type", "hf_config_name", "model_subdir", "tokenizer_subdir"):
         val = getattr(ps, name, None)
         if val is not None:
             engine_args[name] = val
