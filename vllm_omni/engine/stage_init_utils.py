@@ -939,18 +939,15 @@ def initialize_diffusion_stage(
 ) -> Any:
     """Build a diffusion stage client.
 
-    Args:
-        model: Model name or path.
-        stage_cfg: Stage configuration (contains all needed metadata).
-        stage_init_timeout: Timeout in seconds for stage initialization handshake
-        batch_size: Maximum number of requests to batch together in the
-            diffusion engine.  Passed through to ``StageDiffusionClient``
-            and ultimately to ``AsyncOmni``.
-        use_inline: If True, uses the inline diffusion client instead of subprocess.
+    If *stage_cfg* is a ``StageResolvedConfig`` (pre-built), uses the
+    pre-built ``diffusion_config`` directly.  Otherwise falls back to
+    ``build_diffusion_config``.
     """
     from vllm_omni.diffusion.stage_diffusion_client import create_diffusion_client
 
-    od_config = build_diffusion_config(model, stage_cfg)
+    od_config = getattr(stage_cfg, "diffusion_config", None)
+    if od_config is None:
+        od_config = build_diffusion_config(model, stage_cfg)
     return create_diffusion_client(model, od_config, stage_cfg, stage_init_timeout, batch_size, use_inline)
 
 
