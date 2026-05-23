@@ -607,13 +607,6 @@ def build_vllm_config_from_engine_args(
         usage_context=UsageContext.LLM_CLASS,
         headless=headless,
     )
-
-    # Patch hf_config.architectures to the omni model_arch so that vLLM's
-    # multimodal registry and processor resolution recognize the model as
-    # multimodal (the base checkpoint may report a text-only architecture).
-    if omni_engine_args.model_arch:
-        vllm_config.model_config.hf_config.architectures = [omni_engine_args.model_arch]
-
     executor_class = Executor.get_class(vllm_config)
 
     from vllm_omni.quantization.inc_config import OmniINCConfig
