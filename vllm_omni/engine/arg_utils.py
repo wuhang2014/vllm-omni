@@ -17,8 +17,14 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm_omni.config import VllmOmniConfig
 from vllm_omni.config.stage_config import (
     _PIPELINE_WIDE_ENGINE_FIELDS,
+)
+from vllm_omni.config.stage_config import (
     StageDeployConfig as _StageDeployConfig,
+)
+from vllm_omni.config.stage_config import (
     StageExecutionType as _StageExecutionType,
+)
+from vllm_omni.config.stage_config import (
     StagePipelineConfig as _StagePipelineConfig,
 )
 from vllm_omni.engine.output_modality import OutputModality
@@ -493,7 +499,8 @@ class OmniEngineArgs(EngineArgs):
         dtype = self.dtype
         if dtype is None:
             from vllm_omni.platforms import current_omni_platform
-            dtype = current_omni_platform.dtype if hasattr(current_omni_platform, 'dtype') else "auto"
+
+            dtype = current_omni_platform.dtype if hasattr(current_omni_platform, "dtype") else "auto"
 
         return OmniDiffusionConfig(
             model_class_name=self.model_class_name,
@@ -932,9 +939,9 @@ class OmniArgumentParser(FlexibleArgumentParser):
         from vllm_omni.config.stage_config import (
             _DEPLOY_DIR,
             _PIPELINE_REGISTRY,
-            _auto_detect_model_type,
             DeployConfig,
             StageDeployConfig,
+            _auto_detect_model_type,
             load_deploy_config,
         )
 
@@ -1059,9 +1066,16 @@ def _build_unified_stage_overrides(
 
     # Determine stages from pipeline (primary) or deploy YAML (fallback).
     if pipeline is not None:
+        pipeline_model_arch = getattr(pipeline, "model_arch", None)
         for ps in pipeline.stages:
             ds = deploy_by_id.get(ps.stage_id)
-            entry = _build_one_stage_entry(ps, ds, deploy, _PIPELINE_WIDE_ENGINE_FIELDS)
+            entry = _build_one_stage_entry(
+                ps,
+                ds,
+                deploy,
+                _PIPELINE_WIDE_ENGINE_FIELDS,
+                pipeline_model_arch=pipeline_model_arch,
+            )
             result[str(ps.stage_id)] = entry
     else:
         # No pipeline — stages defined purely by deploy YAML.
@@ -1077,6 +1091,7 @@ def _build_one_stage_entry(
     ds: _StageDeployConfig | None,
     deploy: Any,  # DeployConfig
     pipeline_wide_fields: tuple[str, ...],
+    pipeline_model_arch: str | None = None,
 ) -> dict[str, Any]:
     """Build one stage override entry from pipeline topology + deploy YAML."""
     from dataclasses import fields as dc_fields
@@ -1092,7 +1107,7 @@ def _build_one_stage_entry(
     engine_args: dict[str, Any] = {}
 
     # Pipeline topology fields.
-    for name in ("model_arch", "engine_output_type", "hf_config_name", "model_subdir", "tokenizer_subdir"):
+    for name in ("engine_output_type", "hf_config_name", "model_subdir", "tokenizer_subdir"):
         val = getattr(ps, name, None)
         if val is not None:
             engine_args[name] = val
@@ -1127,6 +1142,8 @@ def _build_one_stage_entry(
     # is_comprehension maps from ps.owns_tokenizer (pipeline field name).
     if ps.owns_tokenizer:
         entry["is_comprehension"] = True
+        if pipeline_model_arch:
+            engine_args["model_arch"] = pipeline_model_arch
     for name in (
         "requires_multimodal_data",
         "custom_process_input_func",

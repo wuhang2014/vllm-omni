@@ -9,17 +9,15 @@ out of StageEngineCoreClient into reusable functions.
 from __future__ import annotations
 
 import fcntl
-import importlib
 import multiprocessing as mp
 import os
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.input_processor import InputProcessor
@@ -29,7 +27,7 @@ from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.engine.arg_utils import OmniEngineArgs
 from vllm_omni.engine.output_processor import MultimodalOutputProcessor
 from vllm_omni.entrypoints.stage_utils import _to_dict, set_stage_devices
-from vllm_omni.entrypoints.utils import filter_dataclass_kwargs, resolve_model_config_path
+from vllm_omni.entrypoints.utils import resolve_model_config_path
 from vllm_omni.platforms import current_omni_platform
 
 if TYPE_CHECKING:
@@ -341,6 +339,8 @@ def inject_kv_stage_info(stage_cfg: Any, stage_id: int, stage_configs: Sequence[
             )
     except Exception as e:
         logger.debug("Failed to inject stage info into omni_kv_config: %s", e)
+
+
 def prepare_engine_environment() -> None:
     """One-time global setup: load plugins, set multiprocessing spawn method."""
     from vllm_omni.plugins import load_omni_general_plugins
@@ -593,9 +593,7 @@ def build_vllm_config_from_engine_args(
     The caller is responsible for building the per-stage ``OmniEngineArgs``
     (including model/tokenizer resolution, connector spec injection, etc.).
     """
-    if omni_engine_args.max_model_len is not None and not os.environ.get(
-        "VLLM_ALLOW_LONG_MAX_MODEL_LEN"
-    ):
+    if omni_engine_args.max_model_len is not None and not os.environ.get("VLLM_ALLOW_LONG_MAX_MODEL_LEN"):
         os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
         logger.debug(
             "Auto-set VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 for stage %s (max_model_len=%s).",
@@ -607,6 +605,20 @@ def build_vllm_config_from_engine_args(
         usage_context=UsageContext.LLM_CLASS,
         headless=headless,
     )
+
+    if getattr(omni_engine_args, "model_arch", None):
+        from transformers import PretrainedConfig
+
+        hf_patch = {"architectures": [omni_engine_args.model_arch]}
+        hf_config = vllm_config.model_config.hf_config
+        if isinstance(hf_config, PretrainedConfig):
+            vllm_config.model_config._init_hf_config = vllm_config.model_config.hf_config
+            vllm_config.model_config.hf_config = hf_config.__class__(
+                **{**hf_config.to_dict(), **hf_patch}
+            )
+            logger.debug("Patched hf_config.architectures to %s for stage %s.",
+                         omni_engine_args.model_arch, omni_engine_args.stage_id)
+
     executor_class = Executor.get_class(vllm_config)
 
     from vllm_omni.quantization.inc_config import OmniINCConfig
@@ -952,7 +964,15 @@ def initialize_diffusion_stage(
     od_config = getattr(stage_cfg, "diffusion_config", None)
     if od_config is None:
         od_config = build_diffusion_config(model, stage_cfg)
-    return create_diffusion_client(model, od_config, stage_cfg, stage_init_timeout, batch_size, use_inline, replica_id=replica_id)
+    return create_diffusion_client(
+        model,
+        od_config,
+        stage_cfg,
+        stage_init_timeout,
+        batch_size,
+        use_inline,
+        replica_id=replica_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -987,14 +1007,10 @@ def compute_per_replica_devices(
     (or ``None`` per replica when no split is needed).
     """
     runtime = stage.runtime or {}
-    devices_str: str | None = (
-        runtime.get("devices") if isinstance(runtime, dict) else None
-    )
+    devices_str: str | None = runtime.get("devices") if isinstance(runtime, dict) else None
     devices_per_replica = _get_devices_per_replica_from_resolved(stage)
     if devices_str:
-        return split_devices_for_replicas(
-            devices_str, num_replicas, devices_per_replica, stage_id
-        )
+        return split_devices_for_replicas(devices_str, num_replicas, devices_per_replica, stage_id)
     return [None] * num_replicas
 
 
@@ -1052,8 +1068,7 @@ def launch_headless_diffusion_replicas(
         raise ValueError(f"Diffusion stage {stage_id} has no diffusion_config")
 
     logger.info(
-        "[Headless] Launching %d diffusion replica(s) for stage %d "
-        "via OmniMasterServer at %s:%d",
+        "[Headless] Launching %d diffusion replica(s) for stage %d via OmniMasterServer at %s:%d",
         omni_dp_size_local,
         stage_id,
         omni_master_address,
@@ -1116,10 +1131,7 @@ def launch_headless_diffusion_replicas(
             stage_id,
         )
         if first.exitcode not in (None, 0):
-            raise RuntimeError(
-                f"Diffusion stage {stage_id} replica {first.name!r} "
-                f"exited with code {first.exitcode}"
-            )
+            raise RuntimeError(f"Diffusion stage {stage_id} replica {first.name!r} exited with code {first.exitcode}")
     finally:
         logger.info(
             "[Headless] Shutting down %d diffusion replica(s) for stage %d.",
