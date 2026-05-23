@@ -190,6 +190,11 @@ def _inject_deploy_defaults(model: str, kwargs: dict[str, Any]) -> None:
                 val = getattr(stage_dep, f.name)
                 if val is not None:
                     kwargs.setdefault(f.name, val)
+        # Also build full stage_overrides so headless stages can resolve
+        # their config via create_omni_config (run_headless needs all stages).
+        overrides = _build_unified_stage_overrides(deploy, pipeline)
+        if overrides:
+            kwargs.setdefault("stage_overrides", _json.dumps(overrides, sort_keys=True))
     else:
         # Normal serve: build unified stage_overrides from pipeline + deploy.
         overrides = _build_unified_stage_overrides(deploy, pipeline)

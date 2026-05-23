@@ -1004,6 +1004,13 @@ class OmniArgumentParser(FlexibleArgumentParser):
                     ps = self._omni_pipeline.get_stage(stage_id)
                     if ps:
                         _inject_stage_topology_defaults(self, serve_parser, ps, stage_dep)
+            # Also build full stage_overrides so headless stages can resolve
+            # their config via create_omni_config (run_headless needs all stages).
+            stage_overrides: dict[str, dict[str, Any]] = _build_unified_stage_overrides(deploy, self._omni_pipeline)
+            if stage_overrides:
+                yaml_json = json.dumps(stage_overrides, sort_keys=True)
+                self._set_action_default(serve_parser, "stage_overrides", yaml_json)
+                self._yaml_stage_overrides = stage_overrides
         else:
             # Normal serve: build stage_overrides merging pipeline topology + deploy YAML.
             stage_overrides: dict[str, dict[str, Any]] = _build_unified_stage_overrides(deploy, self._omni_pipeline)
