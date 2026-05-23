@@ -148,15 +148,16 @@ def _inject_deploy_defaults(model: str, kwargs: dict[str, Any]) -> None:
         deploy_path = Path(deploy_config_path)
         if not deploy_path.exists():
             return
-        # Detect model_type from deploy config file name.
-        model_type = deploy_path.stem
     else:
-        model_type, _hf_config = _auto_detect_model_type(model)
+        model_type, _ = _auto_detect_model_type(model)
         if not model_type:
             return
         deploy_path = _DEPLOY_DIR / f"{model_type}.yaml"
         if not deploy_path.exists():
             return
+
+    # Detect or confirm model_type from the model (deploy file may have random suffix).
+    model_type, _ = _auto_detect_model_type(model)
 
     try:
         deploy = load_deploy_config(deploy_path)

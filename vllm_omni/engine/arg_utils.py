@@ -943,9 +943,10 @@ class OmniArgumentParser(FlexibleArgumentParser):
             deploy_path = Path(deploy_config_path)
             if not deploy_path.exists():
                 return
-            model_type = deploy_path.stem
+            # Detect model_type from the model (deploy file may have random suffix).
+            model_type, _ = _auto_detect_model_type(model)
         else:
-            model_type, _hf_config = _auto_detect_model_type(model)
+            model_type, _ = _auto_detect_model_type(model)
             if not model_type:
                 return
             deploy_path = _DEPLOY_DIR / f"{model_type}.yaml"
