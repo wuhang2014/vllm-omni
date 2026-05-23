@@ -58,6 +58,17 @@ def _serialize_stage_config(stage_config: Any) -> Any:
     if dataclasses.is_dataclass(stage_config):
         return _serialize_stage_config(dataclasses.asdict(stage_config))
 
+    # Handle torch.dtype and other non-serializable types.
+    if hasattr(stage_config, "__str__"):
+        try:
+            from enum import Enum
+            from torch import dtype as torch_dtype
+
+            if isinstance(stage_config, (torch_dtype, Enum)):
+                return str(stage_config)
+        except (ImportError, TypeError):
+            pass
+
     if isinstance(stage_config, dict):
         return {key: _serialize_stage_config(value) for key, value in stage_config.items() if not callable(value)}
 
