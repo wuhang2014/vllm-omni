@@ -62,9 +62,10 @@ def _serialize_stage_config(stage_config: Any) -> Any:
     if hasattr(stage_config, "__str__"):
         try:
             from enum import Enum
+            from torch import device as torch_device
             from torch import dtype as torch_dtype
 
-            if isinstance(stage_config, (torch_dtype, Enum)):
+            if isinstance(stage_config, (torch_device, torch_dtype, Enum)):
                 return str(stage_config)
         except (ImportError, TypeError):
             pass
@@ -85,7 +86,7 @@ def _serialize_stage_config(stage_config: Any) -> Any:
             if not key.startswith("_") and not callable(value)
         }
 
-    return stage_config
+    return str(stage_config)
 
 
 # ---------------------------------------------------------------------------
