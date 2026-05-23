@@ -245,7 +245,7 @@ class OmniBase(PDDisaggregationMixin):
 
         logger.info("[%s] Initializing with model %s", self.__class__.__name__, model)
         st = time.time()
-        self.engine = AsyncOmniEngine(model=model, omni_config=omni_config)
+        self.engine = AsyncOmniEngine(model=model, omni_config=omni_config, **kwargs)
         self._shutdown_called = False
         self._weak_finalizer = weakref.finalize(self, _weak_shutdown_engine, self.engine)
         et = time.time()
