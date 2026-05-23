@@ -365,7 +365,11 @@ def _resolve_stages(
             executor_class = None
         else:
             # Build per-stage OmniEngineArgs by overlaying per-stage overrides.
-            per_stage_ea = _dc.replace(engine_args, **per_stage_overrides)
+            # Filter to only include fields that exist on OmniEngineArgs
+            # (per_stage_overrides may contain non-EngineArgs keys like 'devices').
+            valid_fields = {f.name for f in engine_args.__dataclass_fields__.values()}
+            engine_overrides = {k: v for k, v in per_stage_overrides.items() if k in valid_fields}
+            per_stage_ea = _dc.replace(engine_args, **engine_overrides)
             per_stage_ea.stage_id = stage_id
             vllm_config, executor_class = build_vllm_config_from_engine_args(per_stage_ea)
             diffusion_config = None
