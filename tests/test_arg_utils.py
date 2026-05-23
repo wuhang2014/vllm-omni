@@ -23,7 +23,7 @@ def test_all_cli_friendly_fields_have_defaults():
     """Every field on OmniEngineArgs has a default (no required fields)."""
     fields_without_defaults = []
     for f in dc_fields(OmniEngineArgs):
-            if f.default is MISSING and f.default_factory is MISSING:
+        if f.default is MISSING and f.default_factory is MISSING:
             fields_without_defaults.append(f.name)
     assert not fields_without_defaults, (
         f"Fields without defaults: {fields_without_defaults}"
