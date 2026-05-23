@@ -542,7 +542,7 @@ class AsyncOmniEngine:
         head_local_replicas: dict[int, list[int]] = {}
         seen_stage_ids: set[int] = set()
         for plan in stage_plans:
-            stage_id = plan.stage_cfg.stage_id
+            stage_id = plan.configured_stage_id
             if stage_id in seen_stage_ids:
                 raise ValueError(
                     f"Duplicate stage_id {stage_id!r} detected among configured stages; stage_ids must be unique."
