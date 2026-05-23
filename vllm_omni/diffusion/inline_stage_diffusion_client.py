@@ -48,14 +48,14 @@ class InlineStageDiffusionClient(StageClientBase):
     ) -> None:
         self.model = model
         self.od_config = od_config
-        self.stage_id = metadata.stage_id
-        self.replica_id = metadata.replica_id
-        self.final_output = metadata.final_output
-        self.final_output_type = metadata.final_output_type
-        self.default_sampling_params = metadata.default_sampling_params
-        self.requires_multimodal_data = metadata.requires_multimodal_data
-        self.custom_process_input_func = metadata.custom_process_input_func
-        self.engine_input_source = metadata.engine_input_source
+        self.stage_id = getattr(metadata, "stage_id", 0)
+        self.replica_id = getattr(metadata, "replica_id", 0)
+        self.final_output = getattr(metadata, "final_output", False)
+        self.final_output_type = getattr(metadata, "final_output_type", None)
+        self.default_sampling_params = getattr(metadata, "default_sampling_params", None)
+        self.requires_multimodal_data = getattr(metadata, "requires_multimodal_data", False)
+        self.custom_process_input_func = getattr(metadata, "custom_process_input_func", None)
+        self.engine_input_source = getattr(metadata, "engine_input_source", [])
         self.batch_size = batch_size
 
         self._enrich_config()
