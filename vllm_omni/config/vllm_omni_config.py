@@ -354,6 +354,7 @@ def _resolve_stages(
                     f"are available: {physical}"
                 )
             od_config.num_gpus = num_devices
+            od_config.model = model
             cfg_func = _resolve_dotted_func(data.get("cfg_kv_collect_func"))
             if cfg_func is not None:
                 od_config.cfg_kv_collect_func = cfg_func

@@ -531,6 +531,7 @@ class OmniEngineArgs(EngineArgs):
 
         # Build OmniDiffusionConfig directly from engine args fields.
         od_config = self.create_diffusion_config()
+        od_config.model = model
 
         # Validate device count.
         num_devices_per_stage = od_config.parallel_config.world_size
