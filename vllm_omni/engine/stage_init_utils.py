@@ -939,6 +939,7 @@ def initialize_diffusion_stage(
     stage_init_timeout: int,
     batch_size: int = 1,
     use_inline: bool = False,
+    replica_id: int = 0,
 ) -> Any:
     """Build a diffusion stage client.
 
@@ -951,7 +952,7 @@ def initialize_diffusion_stage(
     od_config = getattr(stage_cfg, "diffusion_config", None)
     if od_config is None:
         od_config = build_diffusion_config(model, stage_cfg)
-    return create_diffusion_client(model, od_config, stage_cfg, stage_init_timeout, batch_size, use_inline)
+    return create_diffusion_client(model, od_config, stage_cfg, stage_init_timeout, batch_size, use_inline, replica_id=replica_id)
 
 
 # ---------------------------------------------------------------------------

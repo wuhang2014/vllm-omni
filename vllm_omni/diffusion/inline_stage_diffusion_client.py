@@ -45,11 +45,12 @@ class InlineStageDiffusionClient(StageClientBase):
         od_config: OmniDiffusionConfig,
         metadata: Any,
         batch_size: int = 1,
+        replica_id: int = 0,
     ) -> None:
         self.model = model
         self.od_config = od_config
         self.stage_id = metadata.stage_id
-        self.replica_id = metadata.replica_id
+        self.replica_id = replica_id
         self.final_output = metadata.final_output
         self.final_output_type = metadata.final_output_type
         self.default_sampling_params = metadata.default_sampling_params

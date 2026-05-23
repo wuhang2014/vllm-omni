@@ -48,14 +48,15 @@ def create_diffusion_client(
     stage_init_timeout: int,
     batch_size: int = 1,
     use_inline: bool = False,
+    replica_id: int = 0,
 ) -> Any:
     """Factory to create either an inline or out-of-process diffusion client."""
     if use_inline:
         from vllm_omni.diffusion.inline_stage_diffusion_client import InlineStageDiffusionClient
 
-        return InlineStageDiffusionClient(model, od_config, metadata, batch_size=batch_size)
+        return InlineStageDiffusionClient(model, od_config, metadata, batch_size=batch_size, replica_id=replica_id)
     return StageDiffusionClient(
-        model, od_config, metadata, stage_init_timeout=stage_init_timeout, batch_size=batch_size
+        model, od_config, metadata, stage_init_timeout=stage_init_timeout, batch_size=batch_size, replica_id=replica_id,
     )
 
 
@@ -79,11 +80,12 @@ class StageDiffusionClient(StageClientBase):
         metadata: Any,
         stage_init_timeout: int,
         batch_size: int = 1,
+        replica_id: int = 0,
     ) -> None:
         # Spawn StageDiffusionProc subprocess and wait for READY.
         proc, handshake_address, request_address, response_address = spawn_diffusion_proc(model, od_config)
         complete_diffusion_handshake(proc, handshake_address, stage_init_timeout)
-        self._initialize_client(metadata, request_address, response_address, proc=proc, batch_size=batch_size)
+        self._initialize_client(metadata, request_address, response_address, proc=proc, batch_size=batch_size, replica_id=replica_id)
 
     @classmethod
     def from_addresses(
@@ -94,6 +96,7 @@ class StageDiffusionClient(StageClientBase):
         *,
         proc: Any = None,
         batch_size: int = 1,
+        replica_id: int = 0,
     ) -> StageDiffusionClient:
         """Create a client for an already-running diffusion subprocess."""
         client = cls.__new__(cls)
@@ -103,6 +106,7 @@ class StageDiffusionClient(StageClientBase):
             response_address,
             proc=proc,
             batch_size=batch_size,
+            replica_id=replica_id,
         )
         return client
 
@@ -114,9 +118,10 @@ class StageDiffusionClient(StageClientBase):
         *,
         proc: Any,
         batch_size: int,
+        replica_id: int = 0,
     ) -> None:
         self.stage_id = metadata.stage_id
-        self.replica_id = metadata.replica_id
+        self.replica_id = replica_id
         self.final_output = metadata.final_output
         self.final_output_type = metadata.final_output_type
         self.default_sampling_params = metadata.default_sampling_params

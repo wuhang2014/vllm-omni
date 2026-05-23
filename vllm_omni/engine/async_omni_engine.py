@@ -609,6 +609,7 @@ class AsyncOmniEngine:
                 request_address=alloc.input_bind_address,
                 response_address=alloc.output_bind_address,
                 batch_size=ctx.diffusion_batch_size,
+                replica_id=replica_id,
             )
             logger.info(
                 "[AsyncOmniEngine] Built remote diffusion client for stage=%d replica=%d (req=%s resp=%s)",
@@ -905,6 +906,7 @@ class AsyncOmniEngine:
                     request_address=addresses.inputs[0],
                     response_address=addresses.outputs[0],
                     batch_size=self.diffusion_batch_size,
+                    replica_id=plan.replica_id,
                 )
             else:
                 device_control_env = current_omni_platform.device_control_env_var
@@ -962,6 +964,7 @@ class AsyncOmniEngine:
                                 response_address=response_address,
                                 proc=proc,
                                 batch_size=self.diffusion_batch_size,
+                                replica_id=plan.replica_id,
                             )
                         else:
                             client = initialize_diffusion_stage(
@@ -971,6 +974,7 @@ class AsyncOmniEngine:
                                 stage_init_timeout=stage_init_timeout,
                                 batch_size=self.diffusion_batch_size,
                                 use_inline=self.num_stages == 1 and plan.num_replicas == 1,
+                                replica_id=plan.replica_id,
                             )
                     finally:
                         if previous_visible_devices is None:
