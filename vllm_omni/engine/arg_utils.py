@@ -125,6 +125,7 @@ class OmniEngineArgs(EngineArgs):
     # ── Config files ─────────────────────────────────────────────
 
     deploy_config: str | None = None
+    stage_configs_path: str | None = None
     stage_overrides: str | None = None
 
     # ── Headless ─────────────────────────────────────────────────
@@ -307,6 +308,12 @@ class OmniEngineArgs(EngineArgs):
         group.add_argument("--ray-address", type=str, default=None)
 
         # ── Config files ──
+        group.add_argument(
+            "--stage-configs-path",
+            type=str,
+            default=None,
+            help="[Deprecated] Path to legacy stage_configs YAML. Use --deploy-config instead.",
+        )
         group.add_argument(
             "--deploy-config",
             type=str,
@@ -592,7 +599,7 @@ class OmniEngineArgs(EngineArgs):
         async_chunk = bool(self.async_chunk)
 
         # 4. Load omni transfer config.
-        omni_transfer_config = load_omni_transfer_config_for_model(model, self.deploy_config)
+        omni_transfer_config = load_omni_transfer_config_for_model(model, self.deploy_config or self.stage_configs_path)
 
         # 5. Build per-stage resolved configs.
         resolved_stages, top_level_diffusion_config, prompt_expand_func = _resolve_stages(
@@ -781,7 +788,7 @@ class OmniArgumentParser(FlexibleArgumentParser):
                 model = self._peek_model(args_list)
             if model:
                 stage_id = self._peek_stage_id(args_list)
-                deploy_config_path = self._peek_deploy_config(args_list)
+                deploy_config_path = self._peek_deploy_config(args_list) or self._peek_stage_configs_path(args_list)
                 self._inject_model_defaults(model, stage_id, deploy_config_path=deploy_config_path)
 
         result = super().parse_args(args, namespace)
@@ -886,6 +893,16 @@ class OmniArgumentParser(FlexibleArgumentParser):
             if arg == "--deploy-config" and i + 1 < len(args):
                 return args[i + 1]
             if arg.startswith("--deploy-config="):
+                return arg.split("=", 1)[1]
+        return None
+
+    @staticmethod
+    def _peek_stage_configs_path(args: list[str]) -> str | None:
+        """Peek --stage-configs-path from raw argv (deprecated alias for --deploy-config)."""
+        for i, arg in enumerate(args):
+            if arg == "--stage-configs-path" and i + 1 < len(args):
+                return args[i + 1]
+            if arg.startswith("--stage-configs-path="):
                 return arg.split("=", 1)[1]
         return None
 

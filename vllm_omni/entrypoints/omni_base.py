@@ -143,7 +143,7 @@ def _inject_deploy_defaults(model: str, kwargs: dict[str, Any]) -> None:
         _build_unified_stage_overrides,
     )
 
-    deploy_config_path = kwargs.get("deploy_config")
+    deploy_config_path = kwargs.get("deploy_config") or kwargs.get("stage_configs_path")
     if deploy_config_path:
         deploy_path = Path(deploy_config_path)
         if not deploy_path.exists():
