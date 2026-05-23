@@ -901,7 +901,6 @@ def build_diffusion_config_from_fields(
 def build_diffusion_config(
     model: str,
     stage_cfg: Any,
-    metadata: Any,
 ) -> Any:
     """Build diffusion config for a stage."""
 
@@ -918,13 +917,14 @@ def build_diffusion_config(
 
     if len(physical_devices) < num_devices_per_stage:
         raise ValueError(
-            f"Stage {metadata.stage_id} requires {num_devices_per_stage} device(s) based on parallel_config, "
+            f"Stage {stage_cfg.stage_id} requires {num_devices_per_stage} device(s) based on parallel_config, "
             f"but {len(physical_devices)} device(s) are available: {physical_devices}"
         )
 
     od_config.num_gpus = num_devices_per_stage
-    if metadata.cfg_kv_collect_func is not None:
-        od_config.cfg_kv_collect_func = metadata.cfg_kv_collect_func
+    cfg_func = getattr(stage_cfg, "cfg_kv_collect_func", None)
+    if cfg_func is not None:
+        od_config.cfg_kv_collect_func = cfg_func
     return od_config
 
 
@@ -949,7 +949,7 @@ def initialize_diffusion_stage(
     """
     from vllm_omni.diffusion.stage_diffusion_client import create_diffusion_client
 
-    od_config = build_diffusion_config(model, stage_cfg, stage_cfg)
+    od_config = build_diffusion_config(model, stage_cfg)
     return create_diffusion_client(model, od_config, stage_cfg, stage_init_timeout, batch_size, use_inline)
 
 

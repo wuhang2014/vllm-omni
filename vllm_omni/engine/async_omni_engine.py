@@ -918,7 +918,7 @@ class AsyncOmniEngine:
                         inject_kv_stage_info(plan.stage_cfg, plan.configured_stage_id, self.stage_configs)
                         if self.single_stage_mode:
                             assert self._omni_master_server is not None
-                            od_config = build_diffusion_config(self.model, plan.stage_cfg, plan.stage_cfg)
+                            od_config = build_diffusion_config(self.model, plan.stage_cfg)
                             lock_fds = acquire_diffusion_device_locks(
                                 plan.configured_stage_id,
                                 od_config,
