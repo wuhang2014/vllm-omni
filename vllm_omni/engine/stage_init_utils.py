@@ -637,6 +637,7 @@ def build_llm_stage_output_processor(plan: LogicalStageInitPlan, stage_vllm_conf
 
 def build_stage0_input_processor(stage_vllm_config: Any) -> InputProcessor:
     """Build the shared stage-0 input processor."""
+    from vllm_omni.inputs.preprocess import OmniInputPreprocessor
 
     patch_generation_config_if_needed(stage_vllm_config.model_config)
     input_processor = InputProcessor(vllm_config=stage_vllm_config)
