@@ -607,13 +607,6 @@ def build_vllm_config_from_engine_args(
         usage_context=UsageContext.LLM_CLASS,
         headless=headless,
     )
-
-    # Patch hf_config.architectures when model_arch is set (only the
-    # comprehension stage, per _build_one_stage_entry). This tells vLLM's
-    # multimodal registry that the model supports multimodal inputs.
-    if omni_engine_args.model_arch:
-        vllm_config.model_config.hf_config.architectures = [omni_engine_args.model_arch]
-
     executor_class = Executor.get_class(vllm_config)
 
     from vllm_omni.quantization.inc_config import OmniINCConfig
