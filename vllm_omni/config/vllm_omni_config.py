@@ -414,17 +414,7 @@ def _detect_pd_config(
     try:
         from vllm_omni.entrypoints.pd_utils import PDDisaggregationMixin
 
-        class _PDStage:
-            __slots__ = ("stage_id", "is_prefill_only", "is_decode_only", "engine_input_source")
-
-            def __init__(self, s: StageResolvedConfig) -> None:
-                self.stage_id = s.stage_id
-                self.is_prefill_only = s.is_prefill_only
-                self.is_decode_only = s.is_decode_only
-                self.engine_input_source = s.engine_input_source
-
-        wrappers = [_PDStage(s) for s in resolved_stages]
-        pd_pair = PDDisaggregationMixin.detect_pd_separation_from_stage_configs(wrappers)
+        pd_pair = PDDisaggregationMixin.detect_pd_separation_from_stage_configs(resolved_stages)
         if pd_pair is None:
             return None
 
