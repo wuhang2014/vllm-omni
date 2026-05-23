@@ -609,6 +609,8 @@ def build_vllm_config_from_engine_args(
     )
     executor_class = Executor.get_class(vllm_config)
 
+    from vllm_omni.quantization.inc_config import OmniINCConfig
+
     upgraded = OmniINCConfig.maybe_upgrade(vllm_config.quant_config)
     if upgraded is not vllm_config.quant_config:
         vllm_config = replace(vllm_config, quant_config=upgraded)
