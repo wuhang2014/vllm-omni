@@ -115,11 +115,11 @@ class StageDiffusionClient(StageClientBase):
         proc: Any,
         batch_size: int,
     ) -> None:
-        self.stage_id = getattr(metadata, "stage_id", 0)
-        self.replica_id = getattr(metadata, "replica_id", 0)
-        self.final_output = getattr(metadata, "final_output", False)
-        self.final_output_type = getattr(metadata, "final_output_type", None)
-        self.default_sampling_params = getattr(metadata, "default_sampling_params", None)
+        self.stage_id = metadata.stage_id
+        self.replica_id = metadata.replica_id
+        self.final_output = metadata.final_output
+        self.final_output_type = metadata.final_output_type
+        self.default_sampling_params = metadata.default_sampling_params
         self.requires_multimodal_data = getattr(metadata, "requires_multimodal_data", False)
         self.custom_process_input_func = getattr(metadata, "custom_process_input_func", None)
         self.engine_input_source = getattr(metadata, "engine_input_source", [])
