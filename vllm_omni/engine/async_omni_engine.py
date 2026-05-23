@@ -78,6 +78,7 @@ from vllm_omni.engine.stage_engine_startup import (
 from vllm_omni.engine.stage_init_utils import (
     LogicalStageInitPlan,
     ReplicaInitPlan,
+    acquire_device_locks,
     capture_stage_factory_contexts,
     compute_replica_layout,
     get_stage_connector_spec,
