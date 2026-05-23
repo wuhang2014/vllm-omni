@@ -84,7 +84,6 @@ from vllm_omni.engine.stage_init_utils import (
     get_stage_connector_spec,
     get_stage_devices_per_replica,
     inject_kv_stage_info,
-    inject_omni_kv_config,
     initialize_diffusion_stage,
     load_omni_transfer_config_for_model,
     prepare_engine_environment,
