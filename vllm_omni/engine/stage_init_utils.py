@@ -605,20 +605,6 @@ def build_vllm_config_from_engine_args(
         usage_context=UsageContext.LLM_CLASS,
         headless=headless,
     )
-
-    if getattr(omni_engine_args, "model_arch", None):
-        from transformers import PretrainedConfig
-
-        hf_patch = {"architectures": [omni_engine_args.model_arch]}
-        hf_config = vllm_config.model_config.hf_config
-        if isinstance(hf_config, PretrainedConfig):
-            vllm_config.model_config._init_hf_config = vllm_config.model_config.hf_config
-            vllm_config.model_config.hf_config = hf_config.__class__(
-                **{**hf_config.to_dict(), **hf_patch}
-            )
-            logger.debug("Patched hf_config.architectures to %s for stage %s.",
-                         omni_engine_args.model_arch, omni_engine_args.stage_id)
-
     executor_class = Executor.get_class(vllm_config)
 
     from vllm_omni.quantization.inc_config import OmniINCConfig
