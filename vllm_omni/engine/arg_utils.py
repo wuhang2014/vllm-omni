@@ -1122,8 +1122,10 @@ def _build_one_stage_entry(
     }
 
     # Stage-level overrides from pipeline topology.
+    # is_comprehension maps from ps.owns_tokenizer (pipeline field name).
+    if ps.owns_tokenizer:
+        entry["is_comprehension"] = True
     for name in (
-        "is_comprehension",
         "requires_multimodal_data",
         "custom_process_input_func",
         "prompt_expand_func",
