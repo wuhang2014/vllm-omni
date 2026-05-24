@@ -238,6 +238,25 @@ class DiffusionParallelConfig:
             raise TypeError(f"Expected parallel config dict, got {type(data)!r}")
         return cls(**data)
 
+    @classmethod
+    def from_engine_args(cls, engine_args: Any) -> "DiffusionParallelConfig":
+        """Build from an EngineArgs-like object by intersecting field names.
+
+        Any field on ``DiffusionParallelConfig`` whose name matches a
+        non-None attribute on *engine_args* is adopted.  Fields left
+        unset fall back to the dataclass default (``__post_init__``
+        computes ``world_size`` from the supplied dimensions).
+        """
+        from dataclasses import fields as dc_fields
+
+        kwargs: dict[str, Any] = {}
+        for f in dc_fields(cls):
+            if hasattr(engine_args, f.name):
+                val = getattr(engine_args, f.name)
+                if val is not None:
+                    kwargs[f.name] = val
+        return cls(**kwargs)
+
 
 @dataclass
 class TransformerConfig:
@@ -871,6 +890,49 @@ class OmniDiffusionConfig:
                 self.model_class_name = architectures[0]
             else:
                 raise
+
+    @classmethod
+    def from_engine_args(cls, engine_args: Any) -> "OmniDiffusionConfig":
+        """Build from an ``OmniEngineArgs`` by intersecting field names.
+
+        Constructs ``DiffusionParallelConfig`` via
+        :meth:`DiffusionParallelConfig.from_engine_args`, resolves
+        ``diffusion_attention_config`` from the attention shorthand
+        fields, then auto-maps every other shared field whose name
+        appears on both ``OmniEngineArgs`` and ``OmniDiffusionConfig``.
+        """
+        from dataclasses import fields as dc_fields
+
+        # Nested configs.
+        parallel_config = DiffusionParallelConfig.from_engine_args(engine_args)
+        attention_config = None
+        attn_cfg = getattr(engine_args, "diffusion_attention_config", None)
+        attn_backend = getattr(engine_args, "diffusion_attention_backend", None)
+        if attn_cfg is not None:
+            attention_config = parse_attention_config(attn_cfg, attention_backend=attn_backend)
+        elif attn_backend is not None:
+            attention_config = parse_attention_config(None, attention_backend=attn_backend)
+
+        # Auto-map shared top-level fields.
+        odc_names = {f.name for f in dc_fields(cls)}
+        kwargs: dict[str, Any] = {}
+        for f in dc_fields(type(engine_args)):
+            if f.name in odc_names:
+                val = getattr(engine_args, f.name)
+                if val is not None:
+                    kwargs[f.name] = val
+
+        kwargs["parallel_config"] = parallel_config
+        if attention_config is not None:
+            kwargs["diffusion_attention_config"] = attention_config
+
+        # dtype fallback.
+        if kwargs.get("dtype") is None:
+            from vllm_omni.platforms import current_omni_platform
+
+            kwargs["dtype"] = getattr(current_omni_platform, "dtype", "auto")
+
+        return cls(**kwargs)
 
     @classmethod
     def from_kwargs(cls, **kwargs: Any) -> "OmniDiffusionConfig":

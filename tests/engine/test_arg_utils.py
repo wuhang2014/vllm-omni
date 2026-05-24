@@ -91,6 +91,32 @@ def test_create_diffusion_config_default_parallel_config():
     assert pc.cfg_parallel_size == 1
 
 
+def test_create_diffusion_config_tp_dp_pp_propagation():
+    """tensor_parallel_size, data_parallel_size, pipeline_parallel_size
+    are passed from OmniEngineArgs to DiffusionParallelConfig and
+    correctly compute world_size."""
+    ea = OmniEngineArgs(tensor_parallel_size=4, data_parallel_size=2, pipeline_parallel_size=1)
+    config = ea.create_diffusion_config()
+    pc = config.parallel_config
+    assert pc.tensor_parallel_size == 4
+    assert pc.data_parallel_size == 2
+    assert pc.pipeline_parallel_size == 1
+    # world_size is computed in DiffusionParallelConfig.__post_init__
+    assert pc.world_size == 8  # 4*2*1
+
+
+def test_create_diffusion_config_tp_dp_pp_defaults():
+    """When not set, tensor_parallel_size defaults to 1."""
+    ea = OmniEngineArgs(ulysses_degree=2)
+    config = ea.create_diffusion_config()
+    pc = config.parallel_config
+    assert pc.tensor_parallel_size == 1
+    assert pc.data_parallel_size == 1
+    assert pc.pipeline_parallel_size == 1
+    # world_size: ulysses_degree=2 * (1*1*1*2*1*1) = 2
+    assert pc.world_size == 2
+
+
 def test_create_diffusion_config_explicit_field_mapping():
     """All explicit fields are mapped correctly."""
     ea = OmniEngineArgs(

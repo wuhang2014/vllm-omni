@@ -461,72 +461,12 @@ class OmniEngineArgs(EngineArgs):
     def create_diffusion_config(self) -> Any:
         """Build ``OmniDiffusionConfig`` directly from ``OmniEngineArgs`` fields.
 
-        Constructs ``DiffusionParallelConfig`` from the parallelism fields on
-        ``self``, then builds ``OmniDiffusionConfig`` with all explicit
-        field mappings — uses no intermediate dict and no ``from_kwargs``.
+        Delegates to :meth:`OmniDiffusionConfig.from_engine_args` which
+        auto-maps fields by name — no manual field lists to maintain.
         """
-        from vllm_omni.diffusion.data import (
-            DiffusionParallelConfig,
-            OmniDiffusionConfig,
-            parse_attention_config,
-        )
+        from vllm_omni.diffusion.data import OmniDiffusionConfig
 
-        # Build DiffusionParallelConfig from self.
-        parallel_config = DiffusionParallelConfig(
-            ulysses_degree=self.ulysses_degree or 1,
-            ulysses_mode=self.ulysses_mode,
-            ring_degree=self.ring_degree or 1,
-            cfg_parallel_size=self.cfg_parallel_size,
-            vae_patch_parallel_size=self.vae_patch_parallel_size,
-            use_hsdp=self.use_hsdp,
-            hsdp_shard_size=self.hsdp_shard_size,
-            hsdp_replicate_size=self.hsdp_replicate_size,
-        )
-
-        # Build attention config.
-        attention_config = None
-        if self.diffusion_attention_config is not None:
-            attention_config = parse_attention_config(
-                self.diffusion_attention_config,
-                attention_backend=self.diffusion_attention_backend,
-            )
-        elif self.diffusion_attention_backend is not None:
-            attention_config = parse_attention_config(
-                None,
-                attention_backend=self.diffusion_attention_backend,
-            )
-
-        dtype = self.dtype
-        if dtype is None:
-            from vllm_omni.platforms import current_omni_platform
-
-            dtype = current_omni_platform.dtype if hasattr(current_omni_platform, "dtype") else "auto"
-
-        return OmniDiffusionConfig(
-            model_class_name=self.model_class_name,
-            parallel_config=parallel_config,
-            dtype=dtype,
-            cache_backend=self.cache_backend,
-            cache_config=self.cache_config,
-            enable_cache_dit_summary=self.enable_cache_dit_summary,
-            lora_path=self.lora_path,
-            lora_scale=self.lora_scale or 1.0,
-            enable_cpu_offload=self.enable_cpu_offload,
-            enable_layerwise_offload=self.enable_layerwise_offload,
-            vae_use_slicing=self.vae_use_slicing,
-            vae_use_tiling=self.vae_use_tiling,
-            enforce_eager=self.enforce_eager,
-            enable_multithread_weight_load=self.enable_multithread_weight_load,
-            num_weight_load_threads=self.num_weight_load_threads,
-            enable_sleep_mode=self.enable_sleep_mode,
-            worker_extension_cls=self.worker_extension_cls,
-            custom_pipeline_args=self.custom_pipeline_args,
-            diffusion_load_format=self.diffusion_load_format or "default",
-            diffusers_load_kwargs=self.diffusers_load_kwargs or {},
-            diffusers_call_kwargs=self.diffusers_call_kwargs or {},
-            trust_remote_code=self.trust_remote_code,
-            **(dict(diffusion_attention_config=attention_config) if attention_config is not None else {}),
-        )
+        return OmniDiffusionConfig.from_engine_args(self)
 
     def _build_single_diffusion_omni_config(self, model: str) -> VllmOmniConfig:
         """Build a single-stage diffusion ``VllmOmniConfig`` from this engine args.
