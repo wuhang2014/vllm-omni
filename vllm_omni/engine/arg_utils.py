@@ -1100,7 +1100,7 @@ def _build_one_stage_entry(
 
     # Deploy YAML extras.
     if ds is not None:
-        entry["default_sampling_params"] = ds.default_sampling_params or {}
+        entry["default_sampling_params"] = dict(ds.default_sampling_params) if ds.default_sampling_params else {}
         entry.setdefault("num_replicas", ds.num_replicas)
         entry.setdefault("devices", ds.devices)
 
@@ -1162,7 +1162,7 @@ def _build_deploy_only_stage_entry(
     entry: dict[str, Any] = {
         "stage_type": stage_type_str,
         "engine_args": engine_args,
-        "default_sampling_params": ds.default_sampling_params or {},
+        "default_sampling_params": dict(ds.default_sampling_params) if ds.default_sampling_params else {},
         "num_replicas": ds.num_replicas,
     }
 
