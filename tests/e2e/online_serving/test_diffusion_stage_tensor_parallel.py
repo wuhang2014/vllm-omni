@@ -22,10 +22,9 @@ from __future__ import annotations
 import os
 
 import pytest
-from PIL import Image
 
 from tests.helpers.mark import hardware_test
-from tests.helpers.runtime import OmniServer, OmniServerParams, dummy_messages_from_mix_data
+from tests.helpers.runtime import OmniServerParams, dummy_messages_from_mix_data
 from tests.helpers.stage_config import get_deploy_config_path, modify_stage_config
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -86,7 +85,9 @@ def test_diffusion_stage1_with_tp2_generates_image(omni_server, openai_client) -
         },
     }
 
-    response = openai_client.send_diffusion_request(request_config)
+    responses = openai_client.send_diffusion_request(request_config, request_num=1)
+    assert len(responses) == 1
+    response = responses[0]
     assert response.success, f"Diffusion request failed: {response.error}"
     assert response.images is not None and len(response.images) == 1
     img = response.images[0]
@@ -112,16 +113,15 @@ def test_diffusion_stage1_with_tp2_deterministic(omni_server, openai_client) -> 
         },
     }
 
-    r1 = openai_client.send_diffusion_request(request_config)
-    r2 = openai_client.send_diffusion_request(request_config)
+    r1 = openai_client.send_diffusion_request(request_config, request_num=1)
+    r2 = openai_client.send_diffusion_request(request_config, request_num=1)
 
-    assert r1.success and r2.success
-    assert r1.images and r2.images
-    assert r1.images[0].size == r2.images[0].size == (512, 512)
+    assert r1[0].success and r2[0].success
+    assert r1[0].images and r2[0].images
+    assert r1[0].images[0].size == r2[0].images[0].size == (512, 512)
 
-    # Pixel-by-pixel comparison.
-    img1 = r1.images[0]
-    img2 = r2.images[0]
+    img1 = r1[0].images[0]
+    img2 = r2[0].images[0]
     assert list(img1.getdata()) == list(img2.getdata()), (
         "Same seed must produce identical output"
     )
