@@ -604,10 +604,11 @@ def build_vllm_config_from_engine_args(
     # Resolve worker_cls (dc.replace skips __post_init__ so _prepare_hf_config
     # auto-detection never ran on per-stage engine args).
     if omni_engine_args.worker_cls is None:
-        if omni_engine_args.worker_type == "ar":
-            omni_engine_args.worker_cls = current_omni_platform.get_omni_ar_worker_cls()
-        elif omni_engine_args.worker_type == "generation":
+        if omni_engine_args.worker_type == "generation":
             omni_engine_args.worker_cls = current_omni_platform.get_omni_generation_worker_cls()
+        else:
+            # Default to AR worker (covers worker_type=None or worker_type="ar").
+            omni_engine_args.worker_cls = current_omni_platform.get_omni_ar_worker_cls()
 
     vllm_config = omni_engine_args.create_engine_config(
         usage_context=UsageContext.LLM_CLASS,
