@@ -826,51 +826,51 @@ class OmniDiffusionConfig:
                 else:
                     tf_config_dict = get_hf_file_to_dict("transformer/config.json", self.model)
                     self.set_tf_model_config(TransformerConfig.from_dict(tf_config_dict))
-            else:
-                raise FileNotFoundError("model_index.json not found")
+                return
         except (AttributeError, OSError, ValueError, FileNotFoundError):
-            # Skip transformer config loading for diffusers adapter
-            # (non-DiT models don't have a separate transformer folder/config)
-            if self.diffusion_load_format == "diffusers":
+            pass
+
+        # Fallback: no model_index.json — load config.json instead.
+        # (non-DiT models like Bagel, NextStep don't have model_index.json)
+        if self.diffusion_load_format == "diffusers":
+            self.set_tf_model_config(TransformerConfig())
+            logger.warning(
+                "Could not find valid model_index.json per diffusers format. "
+                "This model is likely unsupported by the diffusers backend. "
+                "Also, without knowing the underlying diffusers pipeline class from model_index.json, "
+                "the dummy run will input only text prompt, which may cause errors for pipelines "
+                "that require additional inputs."
+            )
+        else:
+            cfg = get_hf_file_to_dict("config.json", self.model)
+            if cfg is None:
+                raise ValueError(f"Could not find config.json or model_index.json for model {self.model}")
+            self.set_tf_model_config(TransformerConfig.from_dict(cfg))
+            model_type = cfg.get("model_type")
+            architectures = cfg.get("architectures") or []
+
+            if model_type == "bagel" or "BagelForConditionalGeneration" in architectures:
+                self.model_class_name = "BagelPipeline"
                 self.set_tf_model_config(TransformerConfig())
-                logger.warning(
-                    "Could not find valid model_index.json per diffusers format. "
-                    "This model is likely unsupported by the diffusers backend. "
-                    "Also, without knowing the underlying diffusers pipeline class from model_index.json, "
-                    "the dummy run will input only text prompt, which may cause errors for pipelines "
-                    "that require additional inputs."
-                )
+                self.update_multimodal_support()
+            elif model_type == "neo_chat":
+                self.model_class_name = "SenseNovaU1Pipeline"
+                self.tf_model_config = TransformerConfig()
+                self.update_multimodal_support()
+            elif model_type == "nextstep":
+                if self.model_class_name is None:
+                    self.model_class_name = "NextStep11Pipeline"
+                self.set_tf_model_config(TransformerConfig())
+                self.update_multimodal_support()
+            elif model_type == "s2v":
+                if self.model_class_name is None:
+                    self.model_class_name = "WanS2VPipeline"
+                self.tf_model_config = TransformerConfig()
+                self.update_multimodal_support()
+            elif architectures and len(architectures) == 1:
+                self.model_class_name = architectures[0]
             else:
-                cfg = get_hf_file_to_dict("config.json", self.model)
-                if cfg is None:
-                    raise ValueError(f"Could not find config.json or model_index.json for model {self.model}")
-
-                self.set_tf_model_config(TransformerConfig.from_dict(cfg))
-                model_type = cfg.get("model_type")
-                architectures = cfg.get("architectures") or []
-
-                if model_type == "bagel" or "BagelForConditionalGeneration" in architectures:
-                    self.model_class_name = "BagelPipeline"
-                    self.set_tf_model_config(TransformerConfig())
-                    self.update_multimodal_support()
-                elif model_type == "neo_chat":
-                    self.model_class_name = "SenseNovaU1Pipeline"
-                    self.tf_model_config = TransformerConfig()
-                    self.update_multimodal_support()
-                elif model_type == "nextstep":
-                    if self.model_class_name is None:
-                        self.model_class_name = "NextStep11Pipeline"
-                    self.set_tf_model_config(TransformerConfig())
-                    self.update_multimodal_support()
-                elif model_type == "s2v":
-                    if self.model_class_name is None:
-                        self.model_class_name = "WanS2VPipeline"
-                    self.tf_model_config = TransformerConfig()
-                    self.update_multimodal_support()
-                elif architectures and len(architectures) == 1:
-                    self.model_class_name = architectures[0]
-                else:
-                    raise
+                raise
 
     @classmethod
     def from_kwargs(cls, **kwargs: Any) -> "OmniDiffusionConfig":
