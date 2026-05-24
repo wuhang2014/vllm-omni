@@ -880,7 +880,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
 
         sampling_params_list = []
         for idx, default_params in enumerate(default_params_list):
-            if isinstance(default_params, dict):
+            if isinstance(default_params, dict) or hasattr(default_params, "keys"):
                 default_params = SamplingParams(**default_params)
             if idx == comprehension_idx:
                 params = self._apply_request_overrides(default_params, request)
