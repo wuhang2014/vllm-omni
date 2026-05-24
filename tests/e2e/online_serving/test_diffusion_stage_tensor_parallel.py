@@ -42,7 +42,7 @@ def get_tp2_deploy() -> str:
         updates={
             "stages": {
                 0: {"devices": "0"},
-                1: {"tensor_parallel_size": 2, "devices": "1,2"},
+                1: {"tensor_parallel_size": 2, "devices": "1,3"},
             },
         },
     )
@@ -66,7 +66,7 @@ test_params = [
 # ── Tests ───────────────────────────────────────────────────────────
 
 
-@hardware_test(res={"cuda": "H100"}, num_cards=3)
+@hardware_test(res={"cuda": "H100"}, num_cards=4)
 @pytest.mark.parametrize("omni_server", test_params, indirect=True)
 def test_diffusion_stage1_with_tp2_generates_image(omni_server, openai_client) -> None:
     """Stage-1 diffusion with ``tensor_parallel_size=2`` produces a valid image."""
@@ -94,7 +94,7 @@ def test_diffusion_stage1_with_tp2_generates_image(omni_server, openai_client) -
     assert img.size == (512, 512)
 
 
-@hardware_test(res={"cuda": "H100"}, num_cards=3)
+@hardware_test(res={"cuda": "H100"}, num_cards=4)
 @pytest.mark.parametrize("omni_server", test_params, indirect=True)
 def test_diffusion_stage1_with_tp2_deterministic(omni_server, openai_client) -> None:
     """Same seed → same image (TP does not break determinism)."""
