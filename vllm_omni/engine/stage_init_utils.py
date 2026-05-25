@@ -618,6 +618,13 @@ def build_vllm_config_from_engine_args(
         if isinstance(omni_engine_args.hf_overrides, dict):
             omni_engine_args.hf_overrides.setdefault("architectures", [omni_engine_args.model_arch])
 
+    # Ensure omni model architectures are registered with vLLM.
+    # _ensure_omni_models_registered runs in __post_init__ but dc.replace()
+    # skips that, and child processes need fresh registration.
+    from vllm_omni.engine.arg_utils import register_omni_models_to_vllm
+
+    register_omni_models_to_vllm()
+
     vllm_config = omni_engine_args.create_engine_config(
         usage_context=UsageContext.LLM_CLASS,
         headless=headless,
