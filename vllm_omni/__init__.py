@@ -30,6 +30,13 @@ except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
 from vllm_omni.transformers_utils import configs as _configs  # noqa: F401, E402
 from vllm_omni.transformers_utils import parsers as _parsers  # noqa: F401, E402
 
+# Register omni model architectures with vLLM's ModelRegistry so child
+# processes (StageEngineCoreProc) find architectures like
+# OmniBagelForConditionalGeneration without needing OmniEngineArgs.__post_init__.
+from vllm_omni.engine.arg_utils import register_omni_models_to_vllm as _register_models  # noqa: E402
+
+_register_models()
+
 from .config import OmniModelConfig
 
 
