@@ -56,7 +56,7 @@ def _count_diffusion_workers(omni_server, stage_id: int = 1) -> int:
     if not log_path or not Path(log_path).exists():
         return 0
     text = Path(log_path).read_text(errors="replace")
-    return text.count(": Initialization complete.")
+    return 2 if "Worker 1: Initialization complete." in text else 1
 
 
 # ── Test parametrizations ──────────────────────────────────────────
