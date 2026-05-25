@@ -1071,6 +1071,11 @@ def _build_one_stage_entry(
             val = getattr(ds, f.name)
             if val is not None:
                 engine_args[f.name] = val
+        # Merge engine_extras (per-stage YAML fields that aren't
+        # explicit StageDeployConfig fields, e.g. trust_remote_code,
+        # enforce_eager, enable_prefix_caching).
+        if ds.engine_extras:
+            engine_args.update(ds.engine_extras)
 
     entry: dict[str, Any] = {
         "stage_type": stage_type_str,
@@ -1153,6 +1158,8 @@ def _build_deploy_only_stage_entry(
         val = getattr(ds, f.name)
         if val is not None:
             engine_args[f.name] = val
+    if ds.engine_extras:
+        engine_args.update(ds.engine_extras)
 
     # engine_extras may contain stage_type override.
     extras = ds.engine_extras if ds.engine_extras else {}
