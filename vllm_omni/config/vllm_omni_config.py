@@ -289,6 +289,7 @@ def _resolve_stages(
     import importlib
     import os
 
+    from vllm.sampling_params import SamplingParams
     from vllm_omni.distributed.omni_connectors.utils.initialization import (
         resolve_omni_kv_config_for_stage,
     )
@@ -297,6 +298,7 @@ def _resolve_stages(
         build_vllm_config_from_engine_args,
         get_stage_connector_spec,
     )
+    from vllm_omni.inputs.data import OmniDiffusionSamplingParams
     from vllm_omni.platforms import current_omni_platform
 
     resolved_stages: list[StageResolvedConfig] = []
@@ -318,6 +320,8 @@ def _resolve_stages(
         }
 
         default_sp: dict[str, Any] = data.get("default_sampling_params", {})
+        SPClass = OmniDiffusionSamplingParams if stage_type == "diffusion" else SamplingParams
+        default_sampling_params = SPClass(**default_sp) if default_sp else SPClass()
         runtime: dict[str, Any] = data.get("runtime", {})
         num_replicas: int = runtime.get("num_replicas", data.get("num_replicas", 1))
 
@@ -387,7 +391,7 @@ def _resolve_stages(
                 engine_input_source=data.get("input_sources", data.get("engine_input_source", [])),
                 final_output=data.get("final_output", False),
                 final_output_type=data.get("final_output_type"),
-                default_sampling_params=data.get("default_sampling_params"),
+                default_sampling_params=default_sampling_params,
                 custom_process_input_func=_resolve_dotted_func(data.get("custom_process_input_func")),
                 model_stage=data.get("model_stage") or per_stage_overrides.get("model_stage"),
                 model_arch=per_stage_overrides.get("model_arch") or data.get("model_arch"),
