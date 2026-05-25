@@ -36,6 +36,19 @@ _CI_DEPLOY = get_deploy_config_path("ci/bagel.yaml")
 _NUM_INFERENCE_STEPS = 2
 
 
+def get_tp2_deploy() -> str:
+    """Produce a deploy YAML with TP=2 for the diffusion stage (stage 1)."""
+    return modify_stage_config(
+        _CI_DEPLOY,
+        updates={
+            "stages": {
+                0: {"devices": "0"},
+                1: {"tensor_parallel_size": 2, "devices": "1,3"},
+            },
+        },
+    )
+
+
 def _count_diffusion_workers(omni_server, stage_id: int = 1) -> int:
     """Count initialization-complete Worker N messages in stage log."""
     log_paths = getattr(omni_server, "_stage_log_paths", {})
