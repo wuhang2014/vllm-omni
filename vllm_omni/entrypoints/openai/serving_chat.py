@@ -883,9 +883,9 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             if isinstance(default_params, (SamplingParams, OmniDiffusionSamplingParams)):
                 pass  # already converted
             elif isinstance(default_params, dict):
-                default_params = _filtered_sampling_params(default_params)
+                default_params = self._filtered_sampling_params(default_params)
             else:
-                default_params = _filtered_sampling_params(dict(default_params))
+                default_params = self._filtered_sampling_params(dict(default_params))
             if idx == comprehension_idx:
                 params = self._apply_request_overrides(default_params, request)
                 sampling_params_list.append(params)
