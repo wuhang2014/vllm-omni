@@ -20,6 +20,7 @@ See: https://github.com/vllm-project/vllm-omni/issues/3735#issuecomment-44996631
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -35,17 +36,14 @@ _CI_DEPLOY = get_deploy_config_path("ci/bagel.yaml")
 _NUM_INFERENCE_STEPS = 2
 
 
-def get_tp2_deploy() -> str:
-    """Produce a deploy YAML with TP=2 for the diffusion stage (stage 1)."""
-    return modify_stage_config(
-        _CI_DEPLOY,
-        updates={
-            "stages": {
-                0: {"devices": "0"},
-                1: {"tensor_parallel_size": 2, "devices": "1,3"},
-            },
-        },
-    )
+def _count_diffusion_workers(omni_server, stage_id: int = 1) -> int:
+    """Count initialization-complete Worker N messages in stage log."""
+    log_paths = getattr(omni_server, "_stage_log_paths", {})
+    log_path = log_paths.get((stage_id, 0))
+    if not log_path or not Path(log_path).exists():
+        return 0
+    text = Path(log_path).read_text(errors="replace")
+    return text.count(": Initialization complete.")
 
 
 # ── Test parametrizations ──────────────────────────────────────────
@@ -70,6 +68,10 @@ test_params = [
 @pytest.mark.parametrize("omni_server", test_params, indirect=True)
 def test_diffusion_stage1_with_tp2_generates_image(omni_server, openai_client) -> None:
     """Stage-1 diffusion with ``tensor_parallel_size=2`` produces a valid image."""
+    # Verify TP=2 spawns exactly 2 diffusion workers.
+    workers = _count_diffusion_workers(omni_server, stage_id=1)
+    assert workers == 2, f"Expected 2 diffusion workers for TP=2, found {workers}"
+
     request_config = {
         "model": omni_server.model,
         "messages": dummy_messages_from_mix_data(
@@ -98,6 +100,10 @@ def test_diffusion_stage1_with_tp2_generates_image(omni_server, openai_client) -
 @pytest.mark.parametrize("omni_server", test_params, indirect=True)
 def test_diffusion_stage1_with_tp2_deterministic(omni_server, openai_client) -> None:
     """Same seed → same image (TP does not break determinism)."""
+    # Verify TP=2 spawns exactly 2 diffusion workers.
+    workers = _count_diffusion_workers(omni_server, stage_id=1)
+    assert workers == 2, f"Expected 2 diffusion workers for TP=2, found {workers}"
+
     request_config = {
         "model": omni_server.model,
         "messages": dummy_messages_from_mix_data(
