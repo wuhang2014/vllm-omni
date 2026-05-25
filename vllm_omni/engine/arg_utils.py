@@ -9,7 +9,7 @@ from typing import Any
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.logger import init_logger
 
-from vllm_omni.config import OmniModelConfig
+from vllm_omni.config import DiffusionConfig, OmniModelConfig, VllmOmniConfig
 from vllm_omni.engine.output_modality import OutputModality
 from vllm_omni.platforms import current_omni_platform
 from vllm_omni.plugins import load_omni_general_plugins
@@ -175,12 +175,42 @@ class OmniEngineArgs(EngineArgs):
     has_sampling_extra_args: bool = False
 
     def __post_init__(self) -> None:
+        # ── Resolve worker_cls (no model dependency) ──
         if self.worker_cls is None:
             if self.worker_type == "ar":
                 self.worker_cls = current_omni_platform.get_omni_ar_worker_cls()
             elif self.worker_type == "generation":
                 self.worker_cls = current_omni_platform.get_omni_generation_worker_cls()
+
         load_omni_general_plugins()
+
+        # ── Build stage_connector_config from stage_connector_spec (no model dependency) ──
+        self._stage_connector_config = {
+            "name": self.stage_connector_spec.get("name", "SharedMemoryConnector"),
+            "extra": self.stage_connector_spec.get("extra", {}).copy(),
+        }
+        self._stage_connector_config["extra"]["stage_id"] = self.stage_id
+
+        # ── Inject hf_overrides from model_arch (no model dependency) ──
+        if self.model_arch:
+            if self.hf_overrides is None:
+                self.hf_overrides = {}
+            if isinstance(self.hf_overrides, dict):
+                self.hf_overrides.setdefault("architectures", [self.model_arch])
+                if "model_type" not in self.hf_overrides:
+                    model_type = _ARCH_TO_MODEL_TYPE.get(self.model_arch)
+                    if model_type is not None:
+                        self.hf_overrides.setdefault("model_type", model_type)
+
+                if self.model_arch == "Qwen3TTSCode2Wav" and self.max_model_len is not None:
+                    self.hf_overrides.setdefault("talker_config", {}).setdefault(
+                        "max_position_embeddings", int(self.max_model_len)
+                    )
+
+        # ── Register omni models early (no model dependency) ──
+        self._ensure_omni_models_registered()
+
+        # ── Delegate to parent __post_init__ ──
         super().__post_init__()
 
     @classmethod
@@ -238,53 +268,82 @@ class OmniEngineArgs(EngineArgs):
         self._temp_config_dir = temp_dir
         logger.info("Patched empty HF config with model_type=%s at %s", model_type, temp_dir)
 
+    def build_omni_config(
+        self,
+        *,
+        diffusion_config: DiffusionConfig | None = None,
+        extra_kwargs: dict[str, Any] | None = None,
+    ) -> VllmOmniConfig:
+        """Build the consolidated ``VllmOmniConfig`` from resolved fields.
+
+        Consolidates orchestrator-level flags, coordinator/master settings,
+        and diffusion config into a single typed object that downstream
+        consumers can use instead of reaching into kwargs dicts.
+
+        Args:
+            diffusion_config: Optional pre-built ``DiffusionConfig``.
+                If ``None`` and *extra_kwargs* is provided, one is built
+                from the kwargs.
+            extra_kwargs: Optional dict of additional orchestrator kwargs
+                (e.g. ``stage_init_timeout``, ``output_modalities``).
+                Used to populate orchestrator-only fields.
+
+        Returns:
+            ``VllmOmniConfig`` with all fields resolved.
+        """
+        if extra_kwargs is None:
+            extra_kwargs = {}
+
+        if diffusion_config is None and extra_kwargs:
+            diffusion_config = DiffusionConfig.from_kwargs(extra_kwargs)
+
+        return VllmOmniConfig(
+            model=self.model or "",
+            model_arch=self.model_arch,
+            async_chunk=self.async_chunk,
+            stage_init_timeout=int(extra_kwargs.get("stage_init_timeout", 300)),
+            init_timeout=int(extra_kwargs.get("init_timeout", 600)),
+            shm_threshold_bytes=int(extra_kwargs.get("shm_threshold_bytes", 65536)),
+            batch_timeout=int(extra_kwargs.get("batch_timeout", 10)),
+            worker_backend=str(extra_kwargs.get("worker_backend", "multi_process")),
+            ray_address=extra_kwargs.get("ray_address"),
+            stage_configs_path=self.stage_configs_path,
+            deploy_config_path=extra_kwargs.get("deploy_config"),
+            stage_overrides=extra_kwargs.get("stage_overrides"),
+            master_address=self.omni_master_address,
+            master_port=self.omni_master_port,
+            dp_size_local=self.omni_dp_size_local,
+            lb_policy=self.omni_lb_policy,
+            heartbeat_timeout=self.omni_heartbeat_timeout,
+            single_stage_mode=bool(self.omni_master_address and self.omni_master_port),
+            single_stage_id_filter=self.stage_id,
+            output_modalities=self.output_modalities or [],
+            log_stats=self.log_stats,
+            tokenizer=self.tokenizer,
+            diffusion=diffusion_config,
+            diffusion_batch_size=int(extra_kwargs.get("diffusion_batch_size", 1)),
+            tts_batch_max_items=int(extra_kwargs.get("tts_batch_max_items", 32)),
+            enable_ar_profiler=bool(extra_kwargs.get("enable_ar_profiler", False)),
+            pd_config=extra_kwargs.get("pd_config"),
+        )
+
     def create_model_config(self) -> OmniModelConfig:
         """Create an OmniModelConfig from these engine arguments.
         Returns:
             OmniModelConfig instance with all configuration fields set
         """
-        # register omni models to avoid model not found error
-        self._ensure_omni_models_registered()
+        # _ensure_omni_models_registered() and hf_overrides injection are
+        # already done in __post_init__; we keep model-dependent resolution
+        # (tokenizer, hf_config patching) here.
 
-        # Build stage_connector_config from stage_connector_spec
-        stage_connector_config = {
-            "name": self.stage_connector_spec.get("name", "SharedMemoryConnector"),
-            "extra": self.stage_connector_spec.get("extra", {}).copy(),
-        }
-        stage_connector_config["extra"]["stage_id"] = self.stage_id
+        # Use the stage_connector_config pre-built in __post_init__
+        stage_connector_config = self._stage_connector_config
 
-        # If model_arch is specified, inject it into hf_overrides so vLLM can
-        # resolve the architecture even when config.json lacks 'architectures'.
-        # Also inject model_type so AutoConfig can resolve the correct config
-        # class for models with empty or missing config.json (e.g. CosyVoice3).
-        if self.model_arch:
-            if self.hf_overrides is None:
-                self.hf_overrides = {}
-            if isinstance(self.hf_overrides, dict):
-                self.hf_overrides.setdefault("architectures", [self.model_arch])
-                if "model_type" not in self.hf_overrides:
-                    model_type = _ARCH_TO_MODEL_TYPE.get(self.model_arch)
-                    if model_type is not None:
-                        self.hf_overrides.setdefault("model_type", model_type)
-
-                # Stage wrappers (e.g. Code2Wav) may need max_model_len larger
-                # than the base checkpoint's text max_position_embeddings.
-                if self.model_arch == "Qwen3TTSCode2Wav" and self.max_model_len is not None:
-                    self.hf_overrides.setdefault("talker_config", {}).setdefault(
-                        "max_position_embeddings", int(self.max_model_len)
-                    )
-
-            # For models whose HF config.json is empty or lacks model_type
-            # (e.g. CosyVoice3), AutoConfig.from_pretrained fails because it
-            # cannot determine which config class to use from the empty dict.
-            # hf_overrides alone is not enough since transformers reads
-            # model_type from config_dict before applying overrides.
-            # Workaround: create a patched config.json in a temp directory
-            # and point hf_config_path to it so vLLM reads model_type from it.
-            if not self.hf_config_path:
-                model_type = _ARCH_TO_MODEL_TYPE.get(self.model_arch)
-                if model_type is not None:
-                    self._patch_empty_hf_config(model_type)
+        # Model-dependent hf_config patching (only for models with empty config.json)
+        if self.model_arch and not self.hf_config_path:
+            model_type = _ARCH_TO_MODEL_TYPE.get(self.model_arch)
+            if model_type is not None:
+                self._patch_empty_hf_config(model_type)
 
         # Auto-detect tokenizer for models that store it in a subdirectory
         # rather than the root (e.g. CosyVoice3 uses CosyVoice-BlankEN/).

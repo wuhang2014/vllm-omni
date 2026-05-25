@@ -2,6 +2,7 @@
 Configuration module for vLLM-Omni.
 """
 
+from vllm_omni.config.diffusion_config import DiffusionConfig
 from vllm_omni.config.lora import LoRAConfig
 from vllm_omni.config.model import OmniModelConfig
 from vllm_omni.config.stage_config import (
@@ -18,6 +19,7 @@ from vllm_omni.config.stage_config import (
     merge_pipeline_deploy,
     register_pipeline,
 )
+from vllm_omni.config.vllm_omni_config import VllmOmniConfig
 from vllm_omni.config.yaml_util import (
     create_config,
     load_yaml_config,
@@ -28,6 +30,8 @@ from vllm_omni.config.yaml_util import (
 __all__ = [
     "OmniModelConfig",
     "LoRAConfig",
+    "DiffusionConfig",
+    "VllmOmniConfig",
     "StageConfig",
     "StageConfigFactory",
     "ModelPipeline",

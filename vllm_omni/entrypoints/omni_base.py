@@ -13,6 +13,7 @@ import huggingface_hub
 from vllm.logger import init_logger
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
+from vllm_omni.config import DiffusionConfig, VllmOmniConfig
 from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
 from vllm_omni.engine.messages import (
     EngineQueueMessage,
@@ -169,11 +170,27 @@ class OmniBase(PDDisaggregationMixin):
         self.output_modalities = output_modalities or []
         self.tts_batch_max_items: int = kwargs.pop("tts_batch_max_items", 32)
 
+        # ── Build consolidated VllmOmniConfig ──
+        diffusion_config = DiffusionConfig.from_kwargs(kwargs)
+        if engine_args is not None:
+            omni_config = engine_args.build_omni_config(
+                diffusion_config=diffusion_config,
+                extra_kwargs=kwargs,
+            )
+            omni_config.model = model
+        else:
+            omni_config = VllmOmniConfig.from_kwargs(
+                model=model,
+                kwargs=kwargs,
+                diffusion_config=diffusion_config,
+            )
+
         logger.info("[%s] Initializing with model %s", self.__class__.__name__, model)
         st = time.time()
         self.engine = AsyncOmniEngine(
             model=model,
             engine_args=engine_args,
+            omni_config=omni_config,
             init_timeout=init_timeout,
             stage_init_timeout=stage_init_timeout,
             diffusion_batch_size=diffusion_batch_size,
