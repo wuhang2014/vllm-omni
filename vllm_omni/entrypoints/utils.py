@@ -26,36 +26,32 @@ _DIFFUSERS_CLASS_TO_CONFIG: dict[str, str] = {
 
 
 def inject_omni_kv_config(stage: Any, omni_conn_cfg: dict[str, Any], omni_from: str, omni_to: str) -> None:
-    """Inject connector configuration into stage engine arguments."""
-    # Prepare omni_kv_config dict
-    omni_conf_dict = {}
-    try:
-        # Access engine_args safely (might be OmegaConf or dict)
-        existing_args = stage.engine_args
-        if hasattr(existing_args, "get"):
-            _oc = existing_args.get("omni_kv_config", None)
-            if _oc:
-                if hasattr(_oc, "items"):  # dict-like
-                    omni_conf_dict = dict(_oc)
-                else:  # object?
-                    omni_conf_dict = _to_dict(_oc)
-    except Exception:
-        omni_conf_dict = {}
+    """Inject connector configuration into the stage's omni_kv_config.
 
-    # Inject connector info
-    omni_conf_dict["connector_config"] = omni_conn_cfg
-    omni_conf_dict["omni_from_stage"] = omni_from
-    omni_conf_dict["omni_to_stage"] = omni_to
+    For LLM stages, reads and writes via
+    ``stage.vllm_config.model_config.omni_kv_config``.  For diffusion
+    stages, reads and writes via ``stage.diffusion_config.omni_kv_config``.
+    """
+    # Determine the canonical store.
+    vllm_config = getattr(stage, "vllm_config", None)
+    if vllm_config is not None:
+        omni_conf = dict(getattr(vllm_config.model_config, "omni_kv_config", None) or {})
+    else:
+        diff_config = getattr(stage, "diffusion_config", None)
+        if diff_config is None:
+            logger.debug("Stage has no vllm_config or diffusion_config — skipping omni_kv_config injection")
+            return
+        omni_conf = dict(getattr(diff_config, "omni_kv_config", None) or {})
 
-    # Write back to engine_args
-    try:
-        if hasattr(stage.engine_args, "__setitem__"):
-            stage.engine_args["omni_kv_config"] = omni_conf_dict
-        else:
-            setattr(stage.engine_args, "omni_kv_config", omni_conf_dict)
-    except Exception as e:
-        # Fallback for OmegaConf or similar if direct set fails?
-        logger.error(f"Failed to inject omni connector config into stage: {e}")
+    omni_conf["connector_config"] = omni_conn_cfg
+    omni_conf["omni_from_stage"] = omni_from
+    omni_conf["omni_to_stage"] = omni_to
+
+    # Write back.
+    if vllm_config is not None:
+        vllm_config.model_config.omni_kv_config = omni_conf
+    else:
+        stage.diffusion_config.omni_kv_config = omni_conf
 
 
 def _try_get_class_name_from_diffusers_config(model: str) -> str | None:

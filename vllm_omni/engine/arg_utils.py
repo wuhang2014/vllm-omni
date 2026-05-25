@@ -1077,6 +1077,15 @@ def _build_one_stage_entry(
         if ds.engine_extras:
             engine_args.update(ds.engine_extras)
 
+    # Pipeline's omni_kv_config (need_send_cache, kv_transfer_criteria, etc.)
+    # is consumed by the scheduler and KV transfer manager via
+    # vllm_config.model_config.omni_kv_config.
+    if ps.omni_kv_config:
+        existing = engine_args.get("omni_kv_config") or {}
+        if isinstance(existing, dict):
+            existing.update(dict(ps.omni_kv_config))
+        engine_args["omni_kv_config"] = existing
+
     entry: dict[str, Any] = {
         "stage_type": stage_type_str,
         "engine_args": engine_args,
