@@ -883,10 +883,9 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             if isinstance(default_params, (SamplingParams, OmniDiffusionSamplingParams)):
                 pass  # already converted
             elif isinstance(default_params, dict):
-                default_params = SamplingParams(**default_params)
+                default_params = _filtered_sampling_params(default_params)
             else:
-                # OmegaConf DictConfig or similar dict-like
-                default_params = SamplingParams(**default_params)
+                default_params = _filtered_sampling_params(dict(default_params))
             if idx == comprehension_idx:
                 params = self._apply_request_overrides(default_params, request)
                 sampling_params_list.append(params)
@@ -895,6 +894,12 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                 sampling_params_list.append(default_params.clone())
 
         return sampling_params_list
+
+    @staticmethod
+    def _filtered_sampling_params(data: dict) -> SamplingParams:
+        """Create SamplingParams from a dict, ignoring unknown keys."""
+        valid = set(SamplingParams.__struct_fields__)
+        return SamplingParams(**{k: v for k, v in data.items() if k in valid})
 
     def _log_inputs(
         self,
