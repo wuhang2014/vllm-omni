@@ -1015,7 +1015,7 @@ def _build_unified_stage_overrides(
     if pipeline is not None:
         for ps in pipeline.stages:
             ds = deploy_by_id.get(ps.stage_id)
-            entry = _build_one_stage_entry(ps, ds, deploy, _PIPELINE_WIDE_ENGINE_FIELDS)
+            entry = _build_one_stage_entry(ps, ds, pipeline, deploy, _PIPELINE_WIDE_ENGINE_FIELDS)
             result[str(ps.stage_id)] = entry
     else:
         # No pipeline — stages defined purely by deploy YAML.
@@ -1029,6 +1029,7 @@ def _build_unified_stage_overrides(
 def _build_one_stage_entry(
     ps: _StagePipelineConfig,
     ds: _StageDeployConfig | None,
+    pipeline: Any,  # PipelineConfig
     deploy: Any,  # DeployConfig
     pipeline_wide_fields: tuple[str, ...],
 ) -> dict[str, Any]:
@@ -1043,7 +1044,7 @@ def _build_one_stage_entry(
     elif ps.execution_type == _StageExecutionType.LLM_GENERATION:
         worker_type = "generation"
 
-    engine_args: dict[str, Any] = {}
+    engine_args: dict[str, Any] = {"model_arch": ps.model_arch or pipeline.model_arch}
 
     # Pipeline topology fields.
     for name in ("engine_output_type", "hf_config_name", "model_subdir", "tokenizer_subdir"):

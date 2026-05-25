@@ -610,6 +610,14 @@ def build_vllm_config_from_engine_args(
             # Default to AR worker (covers worker_type=None or worker_type="ar").
             omni_engine_args.worker_cls = current_omni_platform.get_omni_ar_worker_cls()
 
+    # Resolve hf_overrides["architectures"] (dc.replace skips __post_init__
+    # so _prepare_hf_config never ran on per-stage engine args).
+    if omni_engine_args.model_arch:
+        if omni_engine_args.hf_overrides is None:
+            omni_engine_args.hf_overrides = {}
+        if isinstance(omni_engine_args.hf_overrides, dict):
+            omni_engine_args.hf_overrides.setdefault("architectures", [omni_engine_args.model_arch])
+
     vllm_config = omni_engine_args.create_engine_config(
         usage_context=UsageContext.LLM_CLASS,
         headless=headless,
