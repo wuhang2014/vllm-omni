@@ -880,10 +880,12 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
 
         sampling_params_list = []
         for idx, default_params in enumerate(default_params_list):
-            if isinstance(default_params, dict):
+            if isinstance(default_params, (SamplingParams, OmniDiffusionSamplingParams)):
+                pass  # already converted
+            elif isinstance(default_params, dict):
                 default_params = SamplingParams(**default_params)
-            elif hasattr(default_params, "keys") and not hasattr(default_params, "clone"):
-                # OmegaConf DictConfig (dict-like but not a real dict, no .clone())
+            else:
+                # OmegaConf DictConfig or similar dict-like
                 default_params = SamplingParams(**default_params)
             if idx == comprehension_idx:
                 params = self._apply_request_overrides(default_params, request)
