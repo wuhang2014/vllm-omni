@@ -869,6 +869,7 @@ class WorkerProc:
             worker_proc.worker_busy_loop()
         except SystemExit:
             logger.info("Worker %d: Shutdown signal received, starting cleanup.", rank)
+            raise
         finally:
             try:
                 worker_proc.worker.shutdown()
