@@ -875,10 +875,7 @@ class WorkerProc:
                 worker_proc.worker.shutdown()
             except Exception as exc:
                 logger.warning("Worker %d: Shutdown encountered an error: %s", rank, exc)
-            try:
-                worker_proc.context.term()
-            except Exception:
-                pass
+            worker_proc.context.term()
         logger.info("Worker %d: Shutdown complete.", rank)
 
 
