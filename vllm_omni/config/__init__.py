@@ -18,6 +18,19 @@ from vllm_omni.config.stage_config import (
     merge_pipeline_deploy,
     register_pipeline,
 )
+from vllm_omni.config.vllm_omni_config import (
+    CacheConfig,
+    ConnectorConfig,
+    DiffusionConfig,
+    LoadConfig,
+    ModelConfig,
+    OrchestratorConfig,
+    ParallelConfig,
+    RuntimeConfig,
+    SchedulerConfig,
+    VllmOmniConfig,
+    VllmOmniStageConfig,
+)
 from vllm_omni.config.yaml_util import (
     create_config,
     load_yaml_config,
@@ -28,6 +41,17 @@ from vllm_omni.config.yaml_util import (
 __all__ = [
     "OmniModelConfig",
     "LoRAConfig",
+    "ModelConfig",
+    "LoadConfig",
+    "CacheConfig",
+    "SchedulerConfig",
+    "ConnectorConfig",
+    "RuntimeConfig",
+    "ParallelConfig",
+    "DiffusionConfig",
+    "OrchestratorConfig",
+    "VllmOmniStageConfig",
+    "VllmOmniConfig",
     "StageConfig",
     "StageConfigFactory",
     "ModelPipeline",
